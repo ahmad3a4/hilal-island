@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self' file:; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data:; media-src 'self' file: data: blob:; font-src 'self' file:; connect-src 'none'; object-src 'none'; base-uri 'none'" />
+  <title>Hilal</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main id="stage">
+    <div id="island" class="island" data-mode="compact">
+      <section class="layer layer-compact" id="compact"></section>
+      <section class="layer layer-expanded" id="expanded">
+        <header class="bar" id="bar"></header>
+        <div class="views">
+          <div class="view" id="view-music"></div>
+          <div class="view" id="view-downloads"></div>
+          <div class="view" id="view-prayer"></div>
+          <div class="view" id="view-azkar"></div>
+          <div class="view" id="view-settings"></div>
+        </div>
+      </section>
+      <section class="layer layer-reminder" id="reminder"></section>
+      <section class="layer layer-azan" id="azan"></section>
+      <section class="layer layer-toast" id="toast"></section>
+    </div>
+    <button id="bubble" class="bubble" type="button" aria-label="Second activity"></button>
+  </main>
+  <audio id="azan-audio" preload="auto"></audio>
+  <script src="icons.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
