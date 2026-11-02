@@ -50,6 +50,7 @@ function build({ quiet = false } = {}) {
     `-r:${winmd('Devices')}`,
     `-r:${systemRuntime}`,
     `-r:${winrtInterop}`,
+    '-r:System.Management.dll',
     source,
   ];
   try {

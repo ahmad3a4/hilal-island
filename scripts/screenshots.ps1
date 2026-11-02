@@ -34,7 +34,13 @@ $steps = @(
   @('dismiss', $null),
   @('clip', 'clipboard'),
   @('dismiss', $null),
-  @('nomedia', 'compact-idle')
+  @('nomedia', 'compact-idle'),
+  @('demosound', $null),
+  @('expand:sound', 'sound'),
+  @('collapse', $null),
+  @('hud:volume', 'hud-volume'),
+  @('dismiss', $null),
+  @('hud:brightness', 'hud-brightness')
 )
 
 Write-Host 'Running Hilal in demo mode...'
@@ -115,10 +121,11 @@ for ($i = 0; $i -lt $steps.Count; $i++) {
 }
 
 Write-Host 'Framing screenshots...'
-foreach ($name in 'music', 'downloads', 'prayer', 'azkar', 'settings', 'ayah', 'dua', 'azan', 'prealert', 'clipboard') {
+foreach ($name in 'music', 'downloads', 'prayer', 'azkar', 'settings', 'ayah', 'dua', 'azan', 'prealert', 'clipboard', 'sound') {
   Save-Framed @($crops[$name]) $name
 }
 Save-Framed @($crops['compact-idle'], $crops['compact-music'], $crops['compact-download']) 'compact' 56 6
+Save-Framed @($crops['hud-volume'], $crops['hud-brightness']) 'volume' 56 6
 
 # hero: the verse pop-up on top, prayer and music panels below
 $ayah = $crops['ayah']; $prayer = $crops['prayer']; $music = $crops['music']

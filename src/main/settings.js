@@ -48,6 +48,8 @@ function createDefaults(app) {
       launchAtStartup: false,
       hideInFullscreen: true,
       timeFormat: '12h',
+      volumeHud: true, // the island shows volume changes instead of the Windows pop-up
+      scrollVolume: true, // scroll on the island to change the volume (Shift for brightness)
     },
   };
 }

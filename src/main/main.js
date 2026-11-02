@@ -42,6 +42,21 @@ function logError(kind, err) {
     fs.appendFileSync(file, text);
   } catch { /* nowhere left to report it */ }
 }
+// A short record of what the island did (shown, hidden, fullscreen apps, mouse presses) in
+// %APPDATA%Hilalactivity.log, so "the island didn't respond" can be traced afterwards.
+function activity(msg) {
+  trace(msg);
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  try {
+    const file = path.join(app.getPath('userData'), 'activity.log');
+    if (fs.existsSync(file) && fs.statSync(file).size > 256 * 1024) fs.renameSync(file, `${file}.old`);
+    fs.appendFileSync(file, `${stamp} ${msg}
+`);
+  } catch { /* not important enough to report */ }
+}
+const rect = (r) => (r ? `${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width ?? r.w)}x${Math.round(r.height ?? r.h)}` : 'none');
 process.on('uncaughtException', (err) => logError('error', err));
 process.on('unhandledRejection', (err) => logError('unhandled promise', err));
 
@@ -50,10 +65,14 @@ const APP_ID = 'io.github.ahmad3a4.hilal';
 app.setAppUserModelId(APP_ID);
 // Screenshots/tests can run with a throwaway profile (fresh default settings, separate instance).
 if (process.env.DI_USER_DATA) app.setPath('userData', process.env.DI_USER_DATA);
-// Keep our own azan audio out of the Windows media controls, so "pause everything" never pauses it.
-app.commandLine.appendSwitch('disable-features', 'HardwareMediaKeyHandling,MediaSessionService');
+// HardwareMediaKeyHandling, MediaSessionService: keep our own azan audio out of the Windows media
+// controls, so "pause everything" never pauses it.
+// CalculateNativeWinOcclusion: Chromium hides part of a window it thinks is covered (a fullscreen
+// game or video) and did not always bring it back, after which every click on the island was lost.
+app.commandLine.appendSwitch('disable-features', 'HardwareMediaKeyHandling,MediaSessionService,CalculateNativeWinOcclusion');
 
 let win = null;
+let islandShown = false; // is the island on screen (see updateVisibility)
 let tray = null;
 let settings;
 let helper;
@@ -63,7 +82,8 @@ let reminders;
 let azanTimeout = null;
 let quitting = false;
 let demoNoMedia = false;
-const state = { media: { current: null, sessions: [] }, fullscreen: false, azan: null, hiddenByUser: false, uiBusy: false };
+let demoSound = false; // screenshots: sample mixer instead of this PC's apps
+const state = { media: { current: null, sessions: [] }, sound: { master: null, brightness: null }, uiMode: 'compact', fullscreen: false, azan: null, hiddenByUser: false, forceShow: false, uiBusy: false };
 const thumbs = new Map();
 
 const send = (channel, data) => {
@@ -75,8 +95,7 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    state.hiddenByUser = false;
-    updateVisibility();
+    showIsland();
     send('ui:open', 'prayer');
   });
   app.whenReady().then(start);
@@ -97,6 +116,13 @@ function meta() {
 function islandBounds() {
   const { x, y, width } = screen.getPrimaryDisplay().workArea;
   return { x: Math.round(x + (width - WIN_W) / 2), y, width: WIN_W, height: WIN_H };
+}
+
+// Where the window waits while the island is hidden: just left of the leftmost screen, so it
+// covers nothing (not even a fullscreen game).
+function parkedBounds() {
+  const left = Math.min(...screen.getAllDisplays().map((d) => d.bounds.x));
+  return { x: left - WIN_W - 200, y: screen.getPrimaryDisplay().bounds.y, width: WIN_W, height: WIN_H };
 }
 
 function createWindow() {
@@ -129,7 +155,7 @@ function createWindow() {
     },
   });
   win.setAlwaysOnTop(true, 'screen-saver');
-  win.setIgnoreMouseEvents(true, DEMO ? {} : { forward: true });
+  win.setIgnoreMouseEvents(true); // clicks pass through until the cursor is over the island (see watchPointer)
   win.loadFile(path.join(ROOT, 'src', 'renderer', 'index.html'));
   win.once('ready-to-show', () => updateVisibility());
   win.on('blur', () => send('window:blur'));
@@ -150,27 +176,134 @@ function createWindow() {
 
 function reposition() {
   if (!win || win.isDestroyed()) return;
-  win.setBounds(islandBounds());
+  win.setBounds(islandShown ? islandBounds() : parkedBounds());
 }
 
 function shouldHide() {
-  if (state.azan || DEMO) return false;
+  if (state.azan) return false;
   if (state.hiddenByUser) return true;
+  if (DEMO) return false;
+  if (state.forceShow) return false; // you asked for it from the tray, even over a fullscreen app
   return settings.get().general.hideInFullscreen && state.fullscreen;
 }
 
+// The window itself is shown once and never hidden again: "hiding" the island moves it off screen.
+// Once a window has been hidden and shown, Windows asks it on every mouse press whether it wants to
+// be activated, and because the island must never take focus, Chromium answers "no, and drop the
+// press". That is why the island stopped responding to clicks after any fullscreen app.
+
 function updateVisibility() {
   if (!win || win.isDestroyed()) return;
-  if (shouldHide()) {
-    if (win.isVisible()) win.hide();
-  } else if (!win.isVisible()) {
-    win.showInactive();
-    win.setAlwaysOnTop(true, 'screen-saver');
+  const show = !shouldHide();
+  const first = !win.isVisible();
+  if (show === islandShown && !first) return;
+  islandShown = show;
+  setPointerOver(false);
+  win.setIgnoreMouseEvents(true);
+  pointerOver = false;
+  reposition(); // also puts it back if a game changed the screen resolution meanwhile
+  if (first) win.showInactive();
+  win.setAlwaysOnTop(true, 'screen-saver');
+  if (show) activity(`island shown at ${rect(win.getBounds())}${state.forceShow ? ' (over a fullscreen app, from the tray)' : ''}`);
+  else activity(`island hidden (${state.hiddenByUser ? 'from the tray' : 'fullscreen app'})`);
+  send('window:visible', show);
+  rebuildTrayMenu();
+  syncVolumeKeys();
+}
+
+// ------------------------------------------------------------ sound & brightness
+
+// The island handles the volume keys (and shows its own pop-up) only while it is on screen;
+// otherwise, e.g. in a fullscreen game, they go to Windows as usual.
+let volumeKeysOn = null;
+let wheelZone = null; // the island's area in screen pixels while scrolling there changes the volume
+let soundWatching = false;
+const fileIcons = new Map();
+
+function syncVolumeKeys(force = false) {
+  if (!helper) return;
+  const on = !DEMO && islandShown && settings.get().general.volumeHud !== false;
+  if (on === volumeKeysOn && !force) return;
+  volumeKeysOn = on;
+  helper.send('volkeys', on ? '1' : '0');
+}
+
+// Scrolling over the closed island changes the volume. The helper watches the wheel only while
+// the pointer is over the island (Chromium doesn't reliably pass wheel events to this window).
+function syncWheelZone() {
+  if (!helper || !win || win.isDestroyed()) return;
+  const r = islandRects.island;
+  const want = pointerOver && islandShown && !DEMO && r && settings.get().general.scrollVolume !== false
+    && (state.uiMode === 'compact' || state.uiMode === 'osd');
+  if (!want) {
+    if (wheelZone) helper.send('wheelzone', 'off');
+    wheelZone = null;
+    return;
   }
+  const b = win.getBounds();
+  const px = screen.dipToScreenRect(win, { x: Math.round(b.x + r.x), y: Math.round(b.y + r.y), width: Math.round(r.w), height: Math.round(r.h) });
+  const key = `${px.x} ${px.y} ${px.width} ${px.height}`;
+  if (key === wheelZone) return;
+  wheelZone = key;
+  helper.send('wheelzone', px.x, px.y, px.width, px.height);
+}
+
+async function appIcon(file) {
+  if (!file) return '';
+  if (!fileIcons.has(file)) {
+    let url = '';
+    try { url = (await app.getFileIcon(file, { size: 'normal' })).toDataURL(); } catch { /* no icon */ }
+    fileIcons.set(file, url);
+  }
+  return fileIcons.get(file);
+}
+
+// ---------------------------------------------------------- click-through
+// The window is transparent and much bigger than the island, so clicks must pass through it
+// everywhere except on the island itself. We follow the cursor from here rather than with
+// Electron's "forwarded" mouse events, which stop arriving after the window has been hidden
+// once (e.g. for a fullscreen app) and would leave the island unclickable.
+let islandRects = { island: null, bubble: null }; // reported by the page, in window coordinates
+let pointerOver = false;
+let pointerTimer = null;
+let fakeCursor = null; // demo/test runs only: a cursor position inside the window
+
+function setPointerOver(over, cursor) {
+  if (over === pointerOver) return;
+  pointerOver = over;
+  syncWheelZone();
+  if (over) activity(`pointer over the island (cursor ${cursor ? `${cursor.x},${cursor.y}` : '?'}, window ${rect(win.getBounds())}, island ${rect(islandRects.island)})`);
+  if (win && !win.isDestroyed()) win.setIgnoreMouseEvents(!over);
+  send('pointer', over);
+}
+
+function watchPointer() {
+  clearTimeout(pointerTimer);
+  let delay = 250;
+  if (win && !win.isDestroyed() && islandShown && (!DEMO || fakeCursor)) {
+    const b = win.getBounds();
+    const c = fakeCursor ? { x: b.x + fakeCursor.x, y: b.y + fakeCursor.y } : screen.getCursorScreenPoint();
+    const x = c.x - b.x;
+    const y = c.y - b.y;
+    const inside = (r) => !!r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+    setPointerOver(inside(islandRects.island) || inside(islandRects.bubble), c);
+    // Check often only while the cursor is near the island; otherwise a few times a second is plenty.
+    if (x > -120 && x < b.width + 120 && y > -60 && y < b.height + 120) delay = 40;
+  }
+  pointerTimer = setTimeout(watchPointer, delay);
 }
 
 function showIsland() {
   state.hiddenByUser = false;
+  // If a fullscreen app is what keeps it hidden, show it anyway until that app is gone.
+  if (state.fullscreen) state.forceShow = true;
+  updateVisibility();
+  rebuildTrayMenu();
+}
+
+function hideIsland() {
+  state.hiddenByUser = true;
+  state.forceShow = false;
   updateVisibility();
   rebuildTrayMenu();
 }
@@ -256,8 +389,11 @@ function rebuildTrayMenu() {
   const s = settings.get();
   tray.setContextMenu(Menu.buildFromTemplate([
     {
-      label: state.hiddenByUser ? 'Show the island' : 'Hide the island',
-      click: () => { state.hiddenByUser = !state.hiddenByUser; updateVisibility(); rebuildTrayMenu(); },
+      label: islandShown ? 'Hide the island' : 'Show the island',
+      click: () => {
+        if (islandShown) hideIsland();
+        else showIsland();
+      },
     },
     { type: 'separator' },
     { label: 'Show a verse or dhikr now', click: () => { showIsland(); reminders.showNow(); } },
@@ -336,11 +472,14 @@ function registerIpc() {
     thumbs: Object.fromEntries(thumbs),
     downloads: downloads.list(),
     fullscreen: state.fullscreen,
+    sound: state.sound,
   }));
 
-  ipcMain.on('interactive', (_e, on) => {
-    if (DEMO) return; // demo/screenshot runs ignore the mouse completely, so clicks can't change them
-    if (win && !win.isDestroyed()) win.setIgnoreMouseEvents(!on, { forward: true });
+  ipcMain.on('activity', (_e, m) => activity(`page: ${String(m).slice(0, 200)}`));
+
+  ipcMain.on('island:rects', (_e, rects) => {
+    if (rects && typeof rects === 'object') islandRects = { island: rects.island || null, bubble: rects.bubble || null };
+    syncWheelZone();
   });
 
   ipcMain.handle('focus-input', async (_e, on) => {
@@ -359,7 +498,11 @@ function registerIpc() {
     return true;
   });
 
-  ipcMain.on('ui:state', (_e, s) => { state.uiBusy = !!(s && s.expanded); });
+  ipcMain.on('ui:state', (_e, s) => {
+    state.uiBusy = !!(s && s.expanded);
+    state.uiMode = (s && s.mode) || (state.uiBusy ? 'expanded' : 'compact');
+    syncWheelZone();
+  });
 
   ipcMain.on('media', (_e, { cmd, id, arg }) => {
     if (['toggle', 'play', 'pause', 'next', 'prev'].includes(cmd)) helper.send(cmd, id || '');
@@ -423,7 +566,31 @@ function registerIpc() {
   ipcMain.on('reminder:now', () => reminders.showNow());
   ipcMain.handle('reminder:pick', () => reminders.pick(true));
   ipcMain.on('reminder:snooze', (_e, minutes) => reminders.snooze((Number(minutes) || 60) * 60e3));
-  ipcMain.on('app:hide', () => { state.hiddenByUser = true; updateVisibility(); rebuildTrayMenu(); });
+  ipcMain.on('app:hide', () => hideIsland());
+  ipcMain.on('sound', (_e, req) => {
+    const { cmd } = req || {};
+    const value = Number(req && req.value);
+    const pid = Math.max(0, Math.floor(Number(req && req.pid) || 0));
+    const level = Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
+    switch (cmd) {
+      case 'watch':
+        soundWatching = !!(req && req.value);
+        helper.send('mixerwatch', soundWatching ? '1' : '0');
+        break;
+      case 'master': helper.send('vol', level.toFixed(3)); break;
+      case 'mute': helper.send('volmute', req.value ? '1' : '0'); break;
+      case 'step': helper.send('volstep', value > 0 ? '1' : value < 0 ? '-1' : '0', 'wheel'); break;
+      case 'app': helper.send('appvol', pid, level.toFixed(3)); break;
+      case 'appmute': helper.send('appmute', pid, req.value ? '1' : '0'); break;
+      case 'brightness': {
+        const b = Math.round(Math.min(100, Math.max(0, Number.isFinite(value) ? value : 0)));
+        if (state.sound.brightness) state.sound.brightness.level = b;
+        helper.send('setbrightness', b);
+        break;
+      }
+      default: break;
+    }
+  });
   ipcMain.on('app:quit', () => app.quit());
 }
 
@@ -448,6 +615,7 @@ function migrateFromOldName() {
 
 async function start() {
   trace('ready');
+  activity(`Hilal ${app.getVersion()} started${DEMO ? ' (demo)' : ''}`);
   migrateFromOldName();
   settings = new Settings(app);
   helper = new Helper({
@@ -467,7 +635,7 @@ async function start() {
     getSettings: () => settings.get(),
     canShow: () => {
       if (state.azan) return 'later';
-      if (state.hiddenByUser || !win || win.isDestroyed() || !win.isVisible()) return 'skip';
+      if (state.hiddenByUser || !win || win.isDestroyed() || !islandShown) return 'skip';
       if (state.fullscreen && settings.get().azkar.quietInFullscreen) return 'skip';
       try {
         if (powerMonitor.getSystemIdleState(300) !== 'active') return 'skip'; // away or locked
@@ -482,12 +650,14 @@ async function start() {
   trace('creating window');
   createWindow();
   createTray();
+  watchPointer();
   trace('window + tray created');
   watchClipboard();
   downloads.watchBrowser(settings.get().downloads.watchBrowser, app.getPath('downloads'));
   if (!DEMO) {
     reminders.start();
-    applyLoginItem(settings.get().general.launchAtStartup); // test runs never touch the registry
+    // Test runs (demo or a separate test profile) never touch the registry.
+    if (!process.env.DI_USER_DATA) applyLoginItem(settings.get().general.launchAtStartup);
   }
 
   helper.on('media', (msg) => {
@@ -502,10 +672,38 @@ async function start() {
   });
   helper.on('fullscreen', (msg) => {
     state.fullscreen = !!msg.value;
+    if (!state.fullscreen) state.forceShow = false; // the next fullscreen app hides it again
+    activity(`fullscreen ${state.fullscreen ? 'on' : 'off'}: ${msg.window || '?'} (Windows state ${msg.state})`);
     updateVisibility();
     send('fullscreen', state.fullscreen);
   });
-  helper.on('log', (m) => console.log('[helper]', m.msg || m));
+  helper.on('ready', () => {
+    // (Re)started: it knows nothing yet.
+    helper.send('volget');
+    helper.send('brightness');
+    syncVolumeKeys(true);
+    wheelZone = null;
+    syncWheelZone();
+    if (soundWatching) helper.send('mixerwatch', '1');
+  });
+  helper.on('volume', (msg) => {
+    if (demoSound) return;
+    state.sound.master = { ok: msg.ok, level: msg.level, muted: msg.muted, device: msg.device };
+    send('sound:volume', { ...state.sound.master, source: msg.source });
+  });
+  helper.on('mixer', async (msg) => {
+    if (demoSound) return;
+    const ours = new Set(app.getAppMetrics().map((m) => m.pid)); // the azan is adjusted in Settings
+    const apps = (msg.apps || []).filter((a) => !ours.has(a.pid));
+    await Promise.all(apps.map(async (a) => { a.icon = await appIcon(a.path); }));
+    send('sound:mixer', { device: msg.device, apps });
+  });
+  helper.on('peaks', (msg) => { if (!demoSound) send('sound:peaks', msg); });
+  helper.on('brightness', (msg) => {
+    state.sound.brightness = { supported: msg.supported, level: msg.level, method: msg.method };
+    send('brightness', { ...state.sound.brightness, source: msg.source });
+  });
+  helper.on('log', (m) => { console.log('[helper]', m.msg || m); trace(`helper: ${m.msg || m}`); });
   helper.start();
 
   prayer.on('schedule', (s) => send('prayer', s));
@@ -523,15 +721,20 @@ async function start() {
       downloads.watchBrowser(s.downloads.watchBrowser, app.getPath('downloads'));
       downloads.schedule();
     }
-    if (patch.general && 'launchAtStartup' in patch.general) applyLoginItem(s.general.launchAtStartup);
+    if (patch.general && 'launchAtStartup' in patch.general && !process.env.DI_USER_DATA) applyLoginItem(s.general.launchAtStartup);
     if (patch.general && 'hideInFullscreen' in patch.general) updateVisibility();
+    if (patch.general && 'volumeHud' in patch.general) syncVolumeKeys();
+    if (patch.general && 'scrollVolume' in patch.general) syncWheelZone();
     if (patch.azkar) reminders.resetTimer();
     rebuildTrayMenu();
   });
 
   powerMonitor.on('resume', () => prayer.onResume());
   powerMonitor.on('unlock-screen', () => prayer.refresh());
-  screen.on('display-metrics-changed', reposition);
+  screen.on('display-metrics-changed', () => {
+    reposition();
+    activity(`screen changed: ${rect(screen.getPrimaryDisplay().bounds)} at ${screen.getPrimaryDisplay().scaleFactor}x`);
+  });
   screen.on('display-added', reposition);
   screen.on('display-removed', reposition);
 }
@@ -557,7 +760,7 @@ async function runDemo() {
   const log = (m) => { if (process.env.DI_LOG) fs.appendFileSync(process.env.DI_LOG, `[demo] ${m}\n`); };
   if (process.env.DI_LOG) setInterval(() => trace(`heartbeat ${new Date().toISOString().slice(11, 19)}`), 1000);
   for (const [i, step] of DEMO.entries()) {
-    log(`step ${i}: ${step} (visible=${win.isVisible()})`);
+    log(`step ${i}: ${step} (visible=${islandShown})`);
     const cut = step.indexOf(':');
     const kind = cut < 0 ? step : step.slice(0, cut);
     const arg = cut < 0 ? '' : step.slice(cut + 1);
@@ -587,9 +790,58 @@ async function runDemo() {
       });
     }
     if (kind === 'nodl') send('downloads', []);
+    if (kind === 'hud') {
+      if (arg === 'brightness') send('brightness', { supported: true, level: 70, method: 'ddc', source: 'wheel' });
+      else send('sound:volume', { ok: true, level: 0.42, muted: arg === 'muted', device: 'Speakers', source: 'key' });
+      await wait(400);
+      await win.webContents.executeJavaScript('clearTimeout(ui.hudTimer)'); // keep it up for the screenshot
+    }
+    if (kind === 'demosound') {
+      demoSound = true;
+      const icon = async (exe) => (fs.existsSync(exe) ? appIcon(exe) : '');
+      const pf = process.env.ProgramFiles || 'C:\Program Files';
+      const pf86 = process.env['ProgramFiles(x86)'] || 'C:\Program Files (x86)';
+      send('sound:volume', { ok: true, level: 0.64, muted: false, device: 'Speakers (Realtek(R) Audio)', source: 'demo' });
+      send('brightness', { supported: true, level: 70, method: 'ddc', source: 'demo' });
+      send('sound:mixer', {
+        device: 'Speakers (Realtek(R) Audio)',
+        apps: [
+          { pid: 101, name: 'Microsoft Edge', volume: 0.8, muted: false, active: true, system: false, icon: await icon(path.join(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe')) },
+          { pid: 102, name: 'Spotify', volume: 0.55, muted: false, active: true, system: false, icon: '' },
+          { pid: 103, name: 'Windows Media Player', volume: 0.35, muted: true, active: false, system: false, icon: await icon(path.join(pf, 'Windows Media Player', 'wmplayer.exe')) },
+          { pid: 0, name: 'System sounds', volume: 1, muted: false, active: false, system: true, icon: '' },
+        ],
+      });
+      // gently moving levels, like real audio
+      const t0 = Date.now();
+      setInterval(() => {
+        const t = (Date.now() - t0) / 1000;
+        const wave = (f, p) => 0.5 + 0.35 * Math.sin(t * f + p) + 0.1 * Math.sin(t * f * 3.1 + p);
+        send('sound:peaks', { master: wave(5, 0) * 0.8, apps: { 101: wave(5, 0) * 0.7, 102: wave(7, 1) * 0.45, 103: 0, system: 0 } });
+      }, 100);
+    }
     if (kind === 'dismiss') await win.webContents.executeJavaScript('dismissOverlay()');
     if (kind === 'scroll') await win.webContents.executeJavaScript(`document.querySelector('.settings').scrollTop = ${Number(arg) || 0}`);
     if (kind === 'fakedl') send('downloads', fakeDownloads());
+    // click-through tests: a simulated cursor (your real mouse is never moved) and hide/show cycles
+    if (kind === 'cursor') {
+      const r = islandRects.island;
+      fakeCursor = arg === 'island' && r ? { x: r.x + r.w / 2, y: r.y + r.h / 2 } : { x: 450, y: 500 };
+      watchPointer();
+    }
+    if (kind === 'hide' || kind === 'show') {
+      state.hiddenByUser = kind === 'hide';
+      updateVisibility();
+    }
+    if (kind === 'probe') {
+      await wait(300);
+      const hwnd = win.getNativeWindowHandle().readBigUInt64LE(0).toString();
+      const ps = `Add-Type -Namespace W -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern int GetWindowLong(System.IntPtr h, int i);'; [W.U]::GetWindowLong([System.IntPtr]${hwnd}, -20)`;
+      const ex = Number(require('child_process').execFileSync('powershell.exe', ['-NoProfile', '-Command', ps], { encoding: 'utf8', windowsHide: true }).trim());
+      const page = await win.webContents.executeJavaScript('JSON.stringify({ hover: ui.hover, mode: ui.mode })');
+      log(`  probe ${arg}: visible=${islandShown} pointerOver=${pointerOver} clicksPassThrough=${(ex & 0x20) !== 0} page=${page}`);
+      continue;
+    }
     if (kind === 'wait') { await wait(Number(arg) || 1000); continue; }
     await wait(Number(process.env.DI_STEP_MS) || 1600);
     if (dir) {

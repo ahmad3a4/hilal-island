@@ -3,7 +3,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 const CHANNELS = [
   'settings', 'prayer', 'media', 'thumb', 'downloads', 'download:done', 'download:failed', 'reminder', 'azan:start', 'azan:end',
-  'prayer:pre-alert', 'clipboard:link', 'fullscreen', 'window:blur', 'ui:open', 'toast',
+  'prayer:pre-alert', 'clipboard:link', 'fullscreen', 'window:blur', 'ui:open', 'toast', 'pointer', 'window:visible',
+  'sound:volume', 'sound:mixer', 'sound:peaks', 'brightness',
 ];
 
 contextBridge.exposeInMainWorld('island', {
@@ -14,10 +15,12 @@ contextBridge.exposeInMainWorld('island', {
     ipcRenderer.on(channel, handler);
     return () => ipcRenderer.removeListener(channel, handler);
   },
-  setInteractive: (on) => ipcRenderer.send('interactive', !!on),
+  reportRects: (rects) => ipcRenderer.send('island:rects', rects),
+  activity: (message) => ipcRenderer.send('activity', message),
   focusInput: (on) => ipcRenderer.invoke('focus-input', !!on),
   uiState: (state) => ipcRenderer.send('ui:state', state),
   media: (cmd, id, arg) => ipcRenderer.send('media', { cmd, id, arg }),
+  sound: (cmd, value, pid) => ipcRenderer.send('sound', { cmd, value, pid }),
   downloads: {
     add: (url) => ipcRenderer.invoke('dl:add', url),
     action: (id, action) => ipcRenderer.invoke('dl:action', { id, action }),

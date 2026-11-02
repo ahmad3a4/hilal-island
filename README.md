@@ -5,7 +5,7 @@
 # Hilal
 
 **A Dynamic Island for Windows.**<br>
-Your music, your downloads, prayer times with the azan, and a verse or dhikr every few minutes, all in one small pill at the top of your screen.
+Your music, a volume mixer, your downloads, prayer times with the azan, and a verse or dhikr every few minutes, all in one small pill at the top of your screen.
 
 [**Download for Windows**](https://github.com/ahmad3a4/hilal-island/releases/latest) &nbsp;·&nbsp; [العربية](README.ar.md)
 
@@ -61,6 +61,17 @@ When nothing is happening, the island shows the next prayer. When a song plays i
 
 Works with any app that uses the Windows media controls, such as Spotify, YouTube and other sites in Chrome, Edge or Firefox, and Windows Media Player. You get the album art, the progress bar and play/pause/next/previous controls. The colors follow the album cover.
 
+### Sound and brightness
+
+<img src="docs/screenshots/sound.png" alt="The Sound tab: volume, monitor brightness and every app's volume with live levels" />
+
+- **A volume mixer on the island.** The Sound tab shows the volume of your speakers or headphones, your screen's brightness, and every app that plays sound, each with its own slider, mute button and live level.
+- **A nicer volume pop-up.** Press the volume keys and the island shows the new volume instead of the Windows pop-up. In fullscreen games and videos the keys work as usual.
+- **Scroll on the island** to change the volume, or hold **Shift** while scrolling to change the brightness.
+- Brightness works on laptop screens and on most external monitors (through DDC/CI, which some monitors have to switch on in their own menu).
+
+<img src="docs/screenshots/volume.png" width="60%" alt="The volume and brightness pop-ups on the island" />
+
 ### Downloads
 
 <img src="docs/screenshots/downloads.png" alt="Downloads panel with two downloads in progress and one finished" />
@@ -75,7 +86,7 @@ Works with any app that uses the Windows media controls, such as Spotify, YouTub
 
 <img src="docs/screenshots/settings.png" alt="The settings panel" />
 
-Everything is in the island itself (the gear icon): location and calculation method, azan voice, length and volume, which prayers have an azan, how often reminders appear, the download folder, start with Windows, and more.
+Everything is in the island itself (the gear icon): location and calculation method, azan voice, length and volume, which prayers have an azan, how often reminders appear, the download folder, the volume pop-up, start with Windows, and more.
 
 The interface is in English. Prayer names, verses and azkar are in Arabic.
 
@@ -97,6 +108,7 @@ Requires Windows 10 or 11, 64-bit. No admin rights needed.
 |---|---|
 | Open the panel | Click the island |
 | Close it | Move the mouse away, or press Esc |
+| Change the volume | Scroll on the island (hold Shift for brightness), or use the volume keys |
 | Pause the pop-ups for a while | Tray icon → *Pause reminders for 1 hour* |
 | Stop the azan | The **إيقاف الأذان** button, or the tray icon |
 | Hide the island | Tray icon → *Hide the island* |
@@ -130,7 +142,8 @@ src/main/        Electron main process
   settings.js      settings, saved in %APPDATA%\Hilal
 src/renderer/    the island itself (HTML, CSS, JavaScript)
 native/          HilalHelper.cs, a small C# program that reads and controls
-                 Windows media sessions, mutes apps and detects fullscreen apps
+                 Windows media sessions, the volume of each app and the screen
+                 brightness, and detects fullscreen apps
 assets/          fonts, azan recordings, verses, azkar, icon
 ```
 
@@ -141,6 +154,8 @@ The native helper is compiled with the C# compiler that ships with every copy of
 - **The music didn't pause at azan time.** That app doesn't support the Windows media controls. Turn on *Mute other apps too* in Settings → Azan.
 - **The times differ from my mosque by a minute or two.** Use Settings → *Fine-tune times*.
 - **Detect doesn't find my location.** Turn on *Settings → Privacy & security → Location* in Windows, including *Let desktop apps access your location*, or just pick your city.
+- **There's no Brightness slider in the Sound tab.** Your monitor doesn't answer brightness requests. Turn on *DDC/CI* in the monitor's own on-screen menu, then restart Hilal.
+- **The island didn't react to a click.** `%APPDATA%\Hilal\activity.log` records what the island did (fullscreen apps, hiding and showing, clicks). Attach it to an issue.
 - **Something else.** Errors are written to `%APPDATA%\Hilal\error.log`. Please [open an issue](https://github.com/ahmad3a4/hilal-island/issues) and attach it.
 
 ## Credits

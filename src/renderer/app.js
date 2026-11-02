@@ -16,6 +16,7 @@ const S = {
   colors: new Map(),
   downloads: [],
   fullscreen: false,
+  sound: { master: null, brightness: null, mixer: null }, // see sound.js
 };
 
 const ui = {
@@ -31,8 +32,7 @@ const ui = {
   tasbih: { phase: 0, count: 0 },
   hover: false,
   inputFocused: false,
-  interactive: false,
-  lastPoint: null,
+  islandSize: null,
   pinnedSession: null,
   preview: null,
 };
@@ -47,11 +47,13 @@ const E = {
     downloads: $('#view-downloads'),
     prayer: $('#view-prayer'),
     azkar: $('#view-azkar'),
+    sound: $('#view-sound'),
     settings: $('#view-settings'),
   },
   reminder: $('#reminder'),
   azan: $('#azan'),
   toast: $('#toast'),
+  osd: $('#osd'),
   bubble: $('#bubble'),
   audio: $('#azan-audio'),
 };
@@ -202,6 +204,7 @@ function setGeometry() {
     case 'reminder': w = 780; h = E.reminder.offsetHeight; r = 38; break;
     case 'azan': w = 560; h = E.azan.offsetHeight; r = 40; break;
     case 'toast': w = 440; h = E.toast.offsetHeight; r = 28; break;
+    case 'osd': w = 340; h = 44; r = 22; break;
     default: w = clamp(E.compact.offsetWidth, 110, 460); h = 36; r = 18;
   }
   h = Math.min(h, 524);
@@ -209,8 +212,19 @@ function setGeometry() {
   E.island.style.height = `${h}px`;
   E.island.style.borderRadius = `${r}px`;
   E.bubble.style.translate = `${w / 2 + 8}px 0`;
-  clearTimeout(ui.recheckTimer);
-  ui.recheckTimer = setTimeout(recheckInteractive, 650);
+  ui.islandSize = { w, h };
+  reportRects();
+}
+
+// Tells the app where the island (and its bubble) will be, so clicks there reach us and
+// clicks anywhere else in this transparent window pass through to the apps underneath.
+function reportRects() {
+  if (!ui.islandSize) return;
+  const { w, h } = ui.islandSize;
+  const mid = window.innerWidth / 2;
+  const island = { x: mid - w / 2, y: 8, w, h };
+  const bubble = E.bubble.classList.contains('show') ? { x: mid + w / 2 + 8, y: 8, w: 36, h: 36 } : null;
+  api.reportRects({ island, bubble });
 }
 
 function setMode(mode) {
@@ -218,13 +232,14 @@ function setMode(mode) {
   ui.mode = mode;
   E.island.dataset.mode = mode;
   E.island.classList.remove('peek');
-  if (changed) api.uiState({ expanded: mode === 'expanded' });
+  if (changed) api.uiState({ expanded: mode === 'expanded', mode });
   if (mode !== 'expanded') {
     ui.sheet = null;
     releaseFocus();
   }
   renderCompact();
   setGeometry();
+  if (typeof syncSoundWatch === 'function') syncSoundWatch(); // sound.js
 }
 
 function contextualTab() {
@@ -367,12 +382,16 @@ function renderBubble(kind) {
     E.bubble.innerHTML = html;
   }
   E.bubble.dataset.kind = kind || '';
-  E.bubble.classList.toggle('show', !!html);
+  if (E.bubble.classList.contains('show') !== !!html) {
+    E.bubble.classList.toggle('show', !!html);
+    reportRects();
+  }
 }
 
 // ================================================================ expanded
 
 function statusInfo() {
+  if (ui.flash && ui.flash.until > Date.now()) return { cls: 'sound', label: ui.flash.label }; // e.g. "Volume 40%"
   if (ui.azan) return { cls: 'prayer', label: 'Azan' };
   if (activeDownloads().length) return { cls: 'downloading', label: 'Downloading' };
   if (isPlaying()) return { cls: 'playing', label: 'Playing' };
@@ -382,7 +401,7 @@ function statusInfo() {
 
 function renderBar() {
   const st = statusInfo();
-  const tabs = [['music', 'music', 'Music'], ['downloads', 'download', 'Downloads'], ['prayer', 'moon', 'Prayer'], ['azkar', 'book', 'Azkar']];
+  const tabs = [['music', 'music', 'Music'], ['sound', 'volume', 'Sound'], ['downloads', 'download', 'Downloads'], ['prayer', 'moon', 'Prayer'], ['azkar', 'book', 'Azkar']];
   const dlDot = activeDownloads().length > 0 && ui.tab !== 'downloads';
   const html = `<div class="status-chip ${st.cls}"><span class="dot"></span>${st.label}</div>
     <nav class="tabs">${tabs.map(([id, iconName, label]) => `<button class="tab${ui.tab === id ? ' active' : ''}" data-act="tab" data-tab="${id}" title="${label}">${ic(iconName)}<span class="label">${label}</span>${id === 'downloads' && dlDot ? '<span class="badge-dot"></span>' : ''}</button>`).join('')}</nav>
@@ -407,6 +426,7 @@ function renderExpanded() {
   renderBar();
   for (const [k, v] of Object.entries(E.views)) v.classList.toggle('active', k === ui.tab);
   renderView(ui.tab);
+  if (typeof syncSoundWatch === 'function') syncSoundWatch(); // sound.js
 }
 
 function renderView(tab) {
@@ -414,6 +434,7 @@ function renderView(tab) {
   else if (tab === 'downloads') renderDownloads();
   else if (tab === 'prayer') renderPrayer();
   else if (tab === 'azkar') renderAzkar();
+  else if (tab === 'sound') renderSound();
   else if (tab === 'settings') renderSettings(true);
 }
 
@@ -903,6 +924,11 @@ function renderSettings(force = false) {
     row('Offer to download copied links', 'Copy a link to a file and the island asks to download it', switchHtml('downloads.clipboard')),
   ].join(''));
 
+  const sound = section('Sound & display', 'volume', [
+    row('Volume pop-up', 'The island shows the volume when you press the volume keys, instead of the Windows pop-up', switchHtml('general.volumeHud')),
+    row('Scroll to change the volume', 'Scroll on the island; hold Shift to change the screen brightness', switchHtml('general.scrollVolume')),
+  ].join(''));
+
   const general = section('General', 'settings', [
     row('Start with Windows', '', switchHtml('general.launchAtStartup')),
     row('Hide in fullscreen apps', 'Gets out of the way of games and videos (the azan still shows)', switchHtml('general.hideInFullscreen')),
@@ -910,7 +936,7 @@ function renderSettings(force = false) {
     row('Quit', `Hilal ${esc(S.meta.version)}`, `<button class="btn small danger" data-act="quit">${ic('power')}Quit</button>`),
   ].join(''));
 
-  v.innerHTML = `<div class="settings">${location}${azan}${azkar}${downloads}${general}</div>${ui.sheet ? sheetHtml() : ''}`;
+  v.innerHTML = `<div class="settings">${location}${azan}${azkar}${downloads}${sound}${general}</div>${ui.sheet ? sheetHtml() : ''}`;
   const sc = v.querySelector('.settings');
   sc.scrollTop = scroll;
   if (ui.sheet) {
@@ -1004,12 +1030,12 @@ function downloadDoneToast(item) {
     actions.push({ label: 'Open', primary: true, run: () => api.downloads.action(item.id, 'open') });
     actions.push({ icon: 'folder', title: 'Show in folder', run: () => api.downloads.action(item.id, 'show') });
   }
-  return { icon: 'check', tone: 'ok', title: 'Download complete', text: item.name, duration: 8, actions };
+  return { icon: 'check', tone: 'ok', title: 'Download complete', text: item.name, duration: 8, actions, tab: 'downloads' };
 }
 
 function downloadFailedToast(item) {
   return {
-    icon: 'x', tone: 'bad', title: `Download failed: ${item.name}`, text: item.error, wrap: true, duration: 12,
+    icon: 'x', tone: 'bad', title: `Download failed: ${item.name}`, text: item.error, wrap: true, duration: 12, tab: 'downloads',
     actions: [
       { label: 'Retry', primary: true, run: () => api.downloads.action(item.id, 'retry') },
       { icon: 'x', title: 'Dismiss', run: () => {} },
@@ -1025,12 +1051,13 @@ function preAlertToast(e) {
     countdownTo: e.time,
     duration: 12,
     chime: true,
+    tab: 'prayer',
   };
 }
 
 function clipboardToast(link) {
   return {
-    icon: 'link', tone: 'blue', title: 'Download this file?', text: `${link.name} · ${link.host}`, duration: 12,
+    icon: 'link', tone: 'blue', title: 'Download this file?', text: `${link.name} · ${link.host}`, duration: 12, tab: 'downloads',
     actions: [
       {
         label: 'Download', primary: true,
@@ -1185,41 +1212,29 @@ function togglePreview(kind) {
 
 // ================================================================ interaction
 
-function recheckInteractive() {
-  if (ui.lastPoint) updateInteractive(ui.lastPoint[0], ui.lastPoint[1]);
-}
-
-function updateInteractive(x, y) {
-  const el = document.elementFromPoint(x, y);
-  const over = !!el && !!(el.closest('#island') || el.closest('#bubble.show'));
-  if (over !== ui.interactive) {
-    ui.interactive = over;
-    api.setInteractive(over);
-  }
-}
-
-document.addEventListener('mousemove', (e) => {
-  ui.lastPoint = [e.clientX, e.clientY];
-  updateInteractive(e.clientX, e.clientY);
-});
-document.addEventListener('mouseleave', () => {
-  ui.lastPoint = null;
-  if (ui.interactive) {
-    ui.interactive = false;
-    api.setInteractive(false);
-  }
-});
-
-E.island.addEventListener('mouseenter', () => {
+// Hover comes from two places: the app, which follows the cursor and tells us when it is over
+// the island ('pointer'), and the page's own mouse events. Both lead here, so either is enough.
+function pointerEnter() {
+  if (ui.hover) return;
   ui.hover = true;
+  E.island.classList.add('hovering');
   clearTimeout(ui.collapseTimer);
   if (ui.mode === 'compact') E.island.classList.add('peek');
-});
-E.island.addEventListener('mouseleave', () => {
+}
+
+function pointerLeave() {
+  if (!ui.hover) return;
   if (S.meta && S.meta.debug) console.warn('mouse left the island');
   ui.hover = false;
-  E.island.classList.remove('peek');
+  E.island.classList.remove('peek', 'hovering');
   if (ui.mode === 'expanded') scheduleCollapse();
+}
+
+E.island.addEventListener('mouseenter', pointerEnter);
+E.island.addEventListener('mouseleave', (e) => {
+  // moving onto the bubble next to the island still counts as being on the island
+  if (e.relatedTarget && E.bubble.contains(e.relatedTarget)) return;
+  pointerLeave();
 });
 
 const TEXT_INPUT = 'input[type="text"], input[type="search"], textarea';
@@ -1254,14 +1269,33 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-E.island.addEventListener('click', (e) => {
-  if (ui.mode === 'compact' && !e.target.closest('[data-act]')) expand();
+// The closed island opens as soon as you press on it, not on "click": a click needs the press and
+// the release to land on the same element, and the compact content is redrawn every second while a
+// countdown or a download is showing, so a click that straddled a redraw used to be lost.
+E.island.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  api.activity(`press on the island (${ui.mode})`);
+  if (e.target.closest('[data-act]')) return; // buttons do their own thing on click
+  if (ui.mode === 'compact') expand();
+  else if (ui.mode === 'osd') expand('sound');
+  // Pressing a notice (not one of its buttons) opens what it is about.
+  else if (ui.mode === 'toast' && ui.current && ui.current.toast) expand(ui.current.toast.tab);
 });
 
-E.bubble.addEventListener('click', () => {
+function openFromBubble() {
   const kind = E.bubble.dataset.kind;
   expand(kind === 'music' ? 'music' : kind === 'download' ? 'downloads' : 'prayer');
+}
+E.bubble.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  e.stopPropagation();
+  api.activity('press on the bubble');
+  openFromBubble();
 });
+E.bubble.addEventListener('click', (e) => { if (e.detail === 0) openFromBubble(); }); // keyboard
+
+// Keep the app's idea of where the island is in step with the page.
+window.addEventListener('resize', reportRects);
 
 document.addEventListener('click', async (e) => {
   const t = e.target.closest('[data-act]');
@@ -1453,6 +1487,7 @@ function tick() {
   S.media = st.media || S.media;
   S.downloads = st.downloads || [];
   S.fullscreen = st.fullscreen;
+  if (st.sound) Object.assign(S.sound, st.sound);
   for (const [k, v] of Object.entries(st.thumbs || {})) {
     S.thumbs.set(k, v);
     extractColor(k, v);
@@ -1502,6 +1537,14 @@ function tick() {
   api.on('prayer:pre-alert', (e) => present('toast', preAlertToast(e)));
   api.on('clipboard:link', (link) => present('toast', clipboardToast(link)));
   api.on('fullscreen', (v) => { S.fullscreen = v; });
+  api.on('pointer', (over) => (over ? pointerEnter() : pointerLeave()));
+  api.on('window:visible', (visible) => {
+    if (visible) { reportRects(); return; }
+    // Hidden for a fullscreen app (or from the tray): come back as a calm, closed island.
+    ui.hover = false;
+    E.island.classList.remove('peek', 'hovering');
+    if (ui.mode === 'expanded') collapse('window hidden');
+  });
   api.on('window:blur', () => {
     ui.inputFocused = false;
     if (ui.mode === 'expanded' && !ui.hover) collapse('window lost focus');
