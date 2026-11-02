@@ -514,6 +514,7 @@ async function start() {
   reminders.on('show', (item) => send('reminder', item));
   downloads.on('update', (list) => send('downloads', list));
   downloads.on('completed', (item) => send('download:done', item));
+  downloads.on('failed', (item) => send('download:failed', item));
 
   settings.on('change', (s, patch) => {
     send('settings', s);

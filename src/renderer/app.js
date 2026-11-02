@@ -620,7 +620,7 @@ function renderDownloadList() {
     if (!el || el.dataset.shape !== shape) {
       const k = fileKind(d.name);
       const fresh = document.createElement('div');
-      fresh.className = 'dl-item';
+      fresh.className = `dl-item${d.status === 'failed' ? ' failed' : ''}`;
       fresh.dataset.id = d.id;
       fresh.dataset.shape = shape;
       fresh.innerHTML = `<div class="ftile" style="--tile:${k.tile}">${esc(k.label)}</div>
@@ -985,7 +985,7 @@ function showToast(t) {
   E.toast.style.setProperty('--dur', `${t.duration || 7}s`);
   E.toast.innerHTML = `<div class="toast"${t.rtl ? ' dir="rtl"' : ''}>
       <div class="t-icon ${t.tone || ''}">${ic(t.icon || 'bell')}</div>
-      <div class="t-body"><div class="t-title${t.rtl ? ' ar' : ''}">${esc(t.title)}</div>${t.text ? `<div class="t-text${t.rtl ? ' ar' : ''}">${esc(t.text)}</div>` : ''}</div>
+      <div class="t-body"><div class="t-title${t.rtl ? ' ar' : ''}">${esc(t.title)}</div>${t.text ? `<div class="t-text${t.rtl ? ' ar' : ''}${t.wrap ? ' wrap' : ''}">${esc(t.text)}</div>` : ''}</div>
       ${t.countdownTo ? `<div class="t-big" dir="ltr" id="t-countdown">${fmtCountdown(t.countdownTo - Date.now())}</div>` : ''}
       <div class="t-actions">${(t.actions || []).map((a, i) => (a.label
         ? `<button class="btn small${a.primary ? ' primary' : ''}" data-act="toast" data-i="${i}">${a.icon ? ic(a.icon) : ''}${esc(a.label)}</button>`
@@ -1005,6 +1005,16 @@ function downloadDoneToast(item) {
     actions.push({ icon: 'folder', title: 'Show in folder', run: () => api.downloads.action(item.id, 'show') });
   }
   return { icon: 'check', tone: 'ok', title: 'Download complete', text: item.name, duration: 8, actions };
+}
+
+function downloadFailedToast(item) {
+  return {
+    icon: 'x', tone: 'bad', title: `Download failed: ${item.name}`, text: item.error, wrap: true, duration: 12,
+    actions: [
+      { label: 'Retry', primary: true, run: () => api.downloads.action(item.id, 'retry') },
+      { icon: 'x', title: 'Dismiss', run: () => {} },
+    ],
+  };
 }
 
 function preAlertToast(e) {
@@ -1481,6 +1491,7 @@ function tick() {
     refreshDownloads();
   });
   api.on('download:done', (item) => present('toast', downloadDoneToast(item)));
+  api.on('download:failed', (item) => present('toast', downloadFailedToast(item)));
   api.on('reminder', (item) => { if (item) present('reminder', item); });
   api.on('azan:start', (d) => present('azan', d));
   api.on('azan:end', () => {

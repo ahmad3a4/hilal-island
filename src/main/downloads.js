@@ -34,7 +34,7 @@ const MIME_EXT = {
 
 class HttpError extends Error {
   constructor(status) {
-    super(`The server replied ${status}`);
+    super(httpMessage(status));
     this.status = status;
     this.fatal = status >= 400 && status < 500 && ![408, 425, 429].includes(status);
   }
@@ -90,21 +90,21 @@ function uniquePath(dir, name, taken) {
   return path.join(dir, `${base} ${Date.now()}${ext}`);
 }
 
-function planSegments(size, connections) {
-  const n = Math.max(1, Math.min(connections, Math.floor(size / MIN_SEGMENT) || 1));
-  const chunk = Math.ceil(size / n);
-  const segs = [];
-  for (let i = 0; i < n; i++) {
-    const start = i * chunk;
-    if (start >= size) break;
-    segs.push({ id: i, start, end: Math.min(size, start + chunk) - 1, done: 0 });
-  }
-  return segs;
+const discard = async (res) => {
+  try { await res.body?.cancel(); } catch { /* already closed */ }
+};
+
+function httpMessage(status) {
+  if (status === 404 || status === 410) return `The server says this file doesn't exist (${status}). The link has probably expired: copy it again from the website.`;
+  if (status === 401 || status === 403) return `The server refused the download (${status}). The link may need you to be signed in on that site, or it has expired.`;
+  if (status === 429 || status === 503) return `The server is busy (${status}). Try again in a minute.`;
+  if (status >= 500) return `The server had a problem (${status}). Try again later.`;
+  return `The server replied ${status}`;
 }
 
 function friendlyError(err) {
   const code = (err && (err.code || (err.cause && err.cause.code))) || '';
-  if (err instanceof HttpError) return err.status === 404 ? 'File not found on the server (404)' : err.message;
+  if (err instanceof HttpError) return httpMessage(err.status);
   if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return "Can't reach the server - check your internet";
   if (code === 'ECONNRESET' || code === 'UND_ERR_SOCKET' || code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT') return 'The connection was lost';
   if (code === 'ENOSPC') return 'The disk is full';
@@ -129,6 +129,7 @@ class Task {
     this.lastBytes = item.received || 0;
     this.lastTime = Date.now();
     this.firstResponse = null;
+    this.canSplit = true; // false once the server refuses extra connections
   }
 
   get signal() { return this.ctrl.signal; }
@@ -138,8 +139,37 @@ class Task {
     this.ctrl.abort(new Error(reason));
   }
 
-  headers(extra = {}) {
-    return { 'User-Agent': UA, Accept: '*/*', 'Accept-Encoding': 'identity', ...extra };
+  request(url, { from = null, to = null, referer = this.item.referer, signal = this.signal } = {}) {
+    const headers = { 'User-Agent': UA, Accept: '*/*', 'Accept-Encoding': 'identity', 'Accept-Language': 'en-US,en;q=0.9' };
+    if (from !== null) headers.Range = `bytes=${from}-${to !== null ? to : ''}`;
+    if (referer) headers.Referer = referer;
+    return fetch(url, { headers, redirect: 'follow', signal });
+  }
+
+  /**
+   * Asks for one byte range. Uses the address the link redirected to; if that has expired or was
+   * single-use, it goes through the original link again, which usually hands out a fresh one.
+   * Throws when the server won't give exactly that range.
+   */
+  async fetchRange(from, to, signal) {
+    const it = this.item;
+    const urls = [it.finalUrl || it.url];
+    if (it.url !== urls[0]) urls.push(it.url);
+    let error = null;
+    for (const url of urls) {
+      const res = await this.request(url, { from, to, signal });
+      const cr = /bytes\s+(\d+)-/i.exec(res.headers.get('content-range') || '');
+      if (res.status === 206 && cr && Number(cr[1]) === from) {
+        if (url === it.url && res.url) it.finalUrl = res.url; // a fresh redirect target
+        return res;
+      }
+      await discard(res);
+      error = res.ok
+        ? Object.assign(new Error('The server stopped supporting resume. Press retry to start over.'), { fatal: true, noResume: true })
+        : new HttpError(res.status);
+      if (!(res.status >= 400 && res.status < 500)) break; // only a refusal is worth trying the other address for
+    }
+    throw error;
   }
 
   sample(now) {
@@ -161,7 +191,13 @@ class Task {
     this.m.emitUpdate();
     try {
       const s = this.m.getSettings().downloads;
-      if (!it.path) await this.probe(s.folder);
+      if (it.restart) {
+        // The server couldn't continue this one last time: start over.
+        await this.m.cleanup(it);
+        it.path = null;
+        it.restart = false;
+      }
+      if (!it.path) await this.open(s.folder);
       if (it.resumable && it.size > 0) await this.runSegmented(s.connections);
       else await this.runStream();
       it.status = 'completed';
@@ -171,6 +207,10 @@ class Task {
       it.received = it.size;
       this.m.emit('completed', this.m.publicItem(it));
     } catch (err) {
+      if (this.firstResponse) {
+        discard(this.firstResponse);
+        this.firstResponse = null;
+      }
       it.speed = 0;
       if (this.stopReason === 'paused') it.status = 'paused';
       else if (this.stopReason === 'canceled') {
@@ -179,48 +219,76 @@ class Task {
       } else {
         it.status = 'failed';
         it.error = friendlyError(err);
+        this.m.emit('failed', this.m.publicItem(it));
       }
     }
   }
 
-  async probe(folder) {
+  // The first request asks for the whole file. Its answer gives us the name, the size and whether
+  // the server supports ranges, and its body becomes the first connection. Nothing is spent on a
+  // separate "probe" request, which matters for links that only work once.
+  async open(folder) {
     const it = this.item;
-    let res = await fetch(it.url, { headers: this.headers({ Range: 'bytes=0-0' }), redirect: 'follow', signal: this.signal });
-    if (!res.ok && [400, 403, 405, 416, 501].includes(res.status)) {
-      // Some servers dislike range requests: fall back to a plain download.
-      try { await res.body?.cancel(); } catch { /* ignore */ }
-      res = await fetch(it.url, { headers: this.headers(), redirect: 'follow', signal: this.signal });
+    let res = await this.request(it.url, { from: 0 });
+    if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+      // Some servers refuse range requests, or links opened without the page they came from.
+      // Ask once more the way a browser click would.
+      await discard(res);
+      let referer = null;
+      try { referer = `${new URL(it.url).origin}/`; } catch { /* no referer then */ }
+      const retry = await this.request(it.url, { referer });
+      if (!retry.ok) {
+        await discard(retry);
+        throw new HttpError(retry.status);
+      }
+      res = retry;
+      it.referer = referer;
     }
-    if (!res.ok) throw new HttpError(res.status);
-
+    if (!res.ok) {
+      await discard(res);
+      throw new HttpError(res.status);
+    }
     it.finalUrl = res.url || it.url;
+
+    const type = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    const disposition = res.headers.get('content-disposition') || '';
+    let finalPath = '';
+    try { finalPath = new URL(it.finalUrl).pathname; } catch { /* keep empty */ }
+    if (type === 'text/html' && !/attachment/i.test(disposition) && !/\.html?$/i.test(finalPath)) {
+      await discard(res);
+      throw Object.assign(new Error('This link opens a web page, not a file. On that page, right-click the download button, choose "Copy link address", and paste that link here.'), { fatal: true });
+    }
+
     let size = -1;
-    let resumable = false;
-    if (res.status === 206) {
-      const m = /\/(\d+)\s*$/.exec(res.headers.get('content-range') || '');
-      if (m) { size = Number(m[1]); resumable = size > 0; }
-    } else {
+    let ranges = false;
+    const cr = /bytes\s+(\d+)-(\d+)\/(\d+)/i.exec(res.headers.get('content-range') || '');
+    if (res.status === 206 && cr && Number(cr[1]) === 0) {
+      size = Number(cr[3]);
+      ranges = true;
+    } else if (res.status === 206) {
+      // A partial answer we can't use as the start of the file: ask again plainly.
+      await discard(res);
+      res = await this.request(it.url, {});
+      if (!res.ok) {
+        await discard(res);
+        throw new HttpError(res.status);
+      }
+    }
+    if (res.status === 200) {
       const len = Number(res.headers.get('content-length'));
       if (Number.isFinite(len) && len > 0) size = len;
+      ranges = /bytes/i.test(res.headers.get('accept-ranges') || '');
     }
 
-    let name = fromDisposition(res.headers.get('content-disposition')) || nameFromUrl(it.finalUrl) || it.name || 'download';
-    if (!path.extname(name)) {
-      const type = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-      if (MIME_EXT[type]) name += MIME_EXT[type];
-    }
+    let name = fromDisposition(disposition) || nameFromUrl(it.finalUrl) || it.name || 'download';
+    if (!path.extname(name) && MIME_EXT[type]) name += MIME_EXT[type];
     name = sanitizeName(name);
     await fsp.mkdir(folder, { recursive: true });
     it.path = uniquePath(folder, name, this.m.takenPaths(it.id));
     it.name = path.basename(it.path);
     it.size = size;
-    it.resumable = resumable;
-
-    if (res.status === 206) {
-      try { await res.body?.cancel(); } catch { /* ignore */ }
-    } else {
-      this.firstResponse = res; // reuse this response body for the download itself
-    }
+    it.resumable = size > 0 && ranges;
+    this.firstResponse = res;
     this.m.save();
     this.m.emitUpdate();
   }
@@ -232,7 +300,7 @@ class Task {
     const it = this.item;
     await fsp.mkdir(this.partsDir(), { recursive: true });
     hideFolder(path.join(path.dirname(it.path), PARTS_DIR));
-    if (!Array.isArray(it.segments) || !it.segments.length) it.segments = planSegments(it.size, connections);
+    if (!Array.isArray(it.segments) || !it.segments.length) it.segments = [{ id: 0, start: 0, end: it.size - 1, done: 0 }];
 
     // Trust what's actually on disk (the app may have been closed mid-write).
     for (const seg of it.segments) {
@@ -250,22 +318,31 @@ class Task {
 
     const active = new Set();
     let failure = null;
-    const launch = (seg) => {
-      const p = this.runSegment(seg)
+    const launch = (seg, res = null) => {
+      const p = this.runSegment(seg, res)
         .catch((e) => { if (!failure) failure = e; this.ctrl.abort(e); })
         .finally(() => active.delete(p));
       active.add(p);
     };
-    for (const seg of it.segments) if (seg.done < seg.end - seg.start + 1) launch(seg);
-    while (active.size) {
-      await Promise.race(active);
-      if (failure || this.signal.aborted) break;
-      // A connection is free: help the slowest part by splitting what's left of it.
-      while (active.size < connections) {
-        const seg = this.splitLargest();
-        if (!seg) break;
-        launch(seg);
+    // The answer we already have starts at byte 0, so it becomes the first connection.
+    let first = this.firstResponse;
+    this.firstResponse = null;
+    for (const seg of it.segments) {
+      if (seg.done >= seg.end - seg.start + 1) continue;
+      const reuse = first !== null && seg.start === 0 && seg.done === 0;
+      launch(seg, reuse ? first : null);
+      if (reuse) first = null;
+    }
+    if (first) await discard(first);
+
+    while (active.size && !failure && !this.signal.aborted) {
+      // More connections join while there's enough left to share.
+      while (this.canSplit && active.size < connections && !failure && !this.signal.aborted) {
+        const extra = await this.addConnection();
+        if (!extra) break;
+        launch(extra.seg, extra.res);
       }
+      if (active.size) await Promise.race(active);
     }
     await Promise.allSettled([...active]);
     if (failure) throw failure;
@@ -273,41 +350,50 @@ class Task {
     await this.merge();
   }
 
-  splitLargest() {
+  // Asks for the second half of the biggest piece that's left. The piece is only split once the
+  // server answers with exactly that range, so a server that refuses extra connections simply
+  // leaves the download running on the connections it already has.
+  async addConnection() {
     const segs = this.item.segments;
     let best = null;
-    let bestRemaining = 0;
+    let left = 0;
     for (const s of segs) {
-      const remaining = s.end - (s.start + s.done) + 1;
-      if (remaining > bestRemaining) { best = s; bestRemaining = remaining; }
+      const r = s.end - (s.start + s.done) + 1;
+      if (r > left) { best = s; left = r; }
     }
-    if (!best || bestRemaining < MIN_SEGMENT * 2) return null;
-    const mid = best.start + best.done + Math.floor(bestRemaining / 2);
-    const seg = { id: Math.max(...segs.map((s) => s.id)) + 1, start: mid, end: best.end, done: 0 };
-    best.end = mid - 1; // the running connection stops here on its own
+    if (!best || left < MIN_SEGMENT * 2) return null;
+    const end = best.end;
+    const mid = best.start + best.done + Math.floor(left / 2);
+    let res;
+    try {
+      res = await this.fetchRange(mid, end, this.signal);
+    } catch (err) {
+      if (this.signal.aborted) throw err;
+      if (err.status || err.fatal) this.canSplit = false; // the server won't give us more connections
+      return null; // otherwise a network hiccup: try again when a connection frees up
+    }
+    if (best.end !== end || best.start + best.done >= mid) {
+      await discard(res); // that piece moved on while we were asking
+      return null;
+    }
+    const seg = { id: Math.max(...segs.map((s) => s.id)) + 1, start: mid, end, done: 0 };
+    best.end = mid - 1; // its connection stops there by itself
     segs.push(seg);
-    return seg;
+    return { seg, res };
   }
 
-  async runSegment(seg) {
-    let attempt = 0;
+  async runSegment(seg, initial) {
+    let res = initial;
+    let failures = 0;
     while (seg.start + seg.done <= seg.end) {
       if (this.signal.aborted) throw this.signal.reason || new Error('aborted');
       const local = new AbortController();
       const onAbort = () => local.abort();
       this.signal.addEventListener('abort', onAbort, { once: true });
       let fh = null;
+      let got = 0;
       try {
-        const from = seg.start + seg.done;
-        const res = await fetch(this.item.finalUrl || this.item.url, {
-          headers: this.headers({ Range: `bytes=${from}-${seg.end}` }),
-          redirect: 'follow',
-          signal: local.signal,
-        });
-        if (res.status !== 206) {
-          try { await res.body?.cancel(); } catch { /* ignore */ }
-          throw res.ok ? Object.assign(new Error('The server stopped supporting resume'), { fatal: true }) : new HttpError(res.status);
-        }
+        if (!res) res = await this.fetchRange(seg.start + seg.done, seg.end, local.signal);
         fh = await fsp.open(this.partPath(seg), 'a');
         for await (const chunk of res.body) {
           const remaining = seg.end - (seg.start + seg.done) + 1;
@@ -315,17 +401,21 @@ class Task {
           const buf = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
           await fh.write(buf);
           seg.done += buf.length;
+          got += buf.length;
           this.item.received += buf.length;
-          attempt = 0;
           if (buf.length < chunk.length) break;
         }
-        if (seg.start + seg.done <= seg.end) throw new Error('The connection closed early');
+        // Some servers end each answer early on purpose; the loop then simply asks for the rest.
+        if (!got && seg.start + seg.done <= seg.end) throw new Error('The connection closed early');
       } catch (err) {
         if (this.signal.aborted) throw this.signal.reason || err;
-        attempt += 1;
-        if (err.fatal || attempt > 8) throw err;
-        await sleep(Math.min(500 * 2 ** attempt, 15000), this.signal);
+        if (err.noResume) this.item.restart = true;
+        if (err.fatal) throw err;
+        failures = got ? 0 : failures + 1;
+        if (failures > 8) throw err;
+        if (failures) await sleep(Math.min(500 * 2 ** failures, 15000), this.signal);
       } finally {
+        res = null;
         this.signal.removeEventListener('abort', onAbort);
         local.abort(); // drop the connection if we stopped early (e.g. after a split)
         if (fh) await fh.close().catch(() => {});
@@ -374,8 +464,13 @@ class Task {
     const it = this.item;
     let res = this.firstResponse;
     this.firstResponse = null;
-    if (!res) res = await fetch(it.finalUrl || it.url, { headers: this.headers(), redirect: 'follow', signal: this.signal });
-    if (!res.ok) throw new HttpError(res.status);
+    if (!res) {
+      res = await this.request(it.url, {});
+      if (!res.ok) {
+        await discard(res);
+        throw new HttpError(res.status);
+      }
+    }
     const tmp = it.path + MERGE_EXT;
     it.received = 0;
     this.lastBytes = 0;

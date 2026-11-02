@@ -293,6 +293,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid rgba(75, 163, 255
 @keyframes indet { 0% { left: -32%; } 100% { left: 100%; } }
 .dl-meta { font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .dl-meta .err { color: var(--red); }
+.dl-item.failed .dl-meta { white-space: normal; line-height: 1.35; }
 .dl-meta .tag { color: var(--text-3); }
 .dl-actions { display: flex; gap: 2px; flex: none; }
 .dl-actions .icon-btn .ic { width: 15px; height: 15px; }
@@ -366,6 +367,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid rgba(75, 163, 255
 .t-icon.ok { background: rgba(61, 220, 151, 0.16); color: var(--green); }
 .t-icon.gold { background: var(--gold-soft); color: var(--gold); }
 .t-icon.blue { background: rgba(75, 163, 255, 0.16); color: var(--blue); }
+.t-icon.bad { background: rgba(255, 107, 107, 0.16); color: var(--red); }
+.t-text.wrap { white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; line-height: 1.35; margin-top: 2px; }
 .t-body { flex: 1; min-width: 0; }
 .t-title { font-weight: 700; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .t-title.ar { font-family: var(--font-ar); direction: rtl; text-align: right; }

@@ -81,7 +81,7 @@ The interface is in English. Prayer names, verses and azkar are in Arabic.
 
 ## Install
 
-1. Download **`Hilal-Setup-1.0.0.exe`** from the [latest release](https://github.com/ahmad3a4/hilal-island/releases/latest).
+1. Download **`Hilal-Setup-….exe`** from the [latest release](https://github.com/ahmad3a4/hilal-island/releases/latest). To update later, just install the new version over the old one; your settings stay.
 2. Run it. The installer isn't code-signed yet, so Windows may show *"Windows protected your PC"*. Click **More info**, then **Run anyway**.
 3. Pick English or Arabic and a folder. Hilal starts when the installer finishes.
 
@@ -117,7 +117,7 @@ npm start        # run Hilal
 npm run dist     # build the installer into dist/
 ```
 
-Other scripts: `npm run test:prayer` compares the prayer times with the Aladhan API, `npm run fetch:ayat` re-downloads the verses from Tanzil, and `scripts/screenshots.ps1` retakes the screenshots in this README.
+Other scripts: `npm run test:prayer` compares the prayer times with the Aladhan API, `npm run test:downloads` checks the downloader against a local server that imitates difficult hosts, `npm run fetch:ayat` re-downloads the verses from Tanzil, and `scripts/screenshots.ps1` retakes the screenshots in this README.
 
 ## How it works
 

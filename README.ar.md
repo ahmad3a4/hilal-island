@@ -81,7 +81,7 @@
 
 ## التثبيت
 
-1. نزّل **`Hilal-Setup-1.0.0.exe`** من [آخر إصدار](https://github.com/ahmad3a4/hilal-island/releases/latest).
+1. نزّل ملف **`Hilal-Setup-….exe`** من [آخر إصدار](https://github.com/ahmad3a4/hilal-island/releases/latest). وللتحديث لاحقًا ثبّت الإصدار الجديد فوق القديم، وتبقى إعداداتك كما هي.
 2. شغّله. المثبّت غير موقَّع رقميًا بعد، لذلك قد يُظهر ويندوز رسالة *«Windows protected your PC»*. اضغط **More info** ثم **Run anyway**.
 3. اختر العربية أو الإنجليزية ومجلد التثبيت، وسيعمل هلال فور انتهاء التثبيت.
 
@@ -115,7 +115,7 @@ npm start        # run Hilal
 npm run dist     # build the installer into dist/
 ```
 
-أوامر أخرى: ‏`npm run test:prayer` يقارن المواقيت بخدمة Aladhan، و`npm run fetch:ayat` يعيد تنزيل الآيات من تنزيل، و`scripts/screenshots.ps1` يعيد التقاط الصور في هذا الملف.
+أوامر أخرى: ‏`npm run test:prayer` يقارن المواقيت بخدمة Aladhan، و`npm run test:downloads` يختبر محمّل الملفات على خادم محلي يحاكي المواقع الصعبة، و`npm run fetch:ayat` يعيد تنزيل الآيات من تنزيل، و`scripts/screenshots.ps1` يعيد التقاط الصور في هذا الملف.
 
 ## كيف يعمل
 

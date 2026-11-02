@@ -2,7 +2,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const CHANNELS = [
-  'settings', 'prayer', 'media', 'thumb', 'downloads', 'download:done', 'reminder', 'azan:start', 'azan:end',
+  'settings', 'prayer', 'media', 'thumb', 'downloads', 'download:done', 'download:failed', 'reminder', 'azan:start', 'azan:end',
   'prayer:pre-alert', 'clipboard:link', 'fullscreen', 'window:blur', 'ui:open', 'toast',
 ];
 

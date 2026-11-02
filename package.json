@@ -1,7 +1,7 @@
 {
   "name": "hilal-island",
   "productName": "Hilal",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Hilal: a Dynamic Island for Windows with music, downloads, prayer times, azan and azkar.",
   "main": "src/main/main.js",
   "private": true,
@@ -12,7 +12,17 @@
     "type": "git",
     "url": "https://github.com/ahmad3a4/hilal-island.git"
   },
-  "keywords": ["dynamic-island", "windows", "electron", "prayer-times", "azan", "adhan", "azkar", "quran", "downloader"],
+  "keywords": [
+    "dynamic-island",
+    "windows",
+    "electron",
+    "prayer-times",
+    "azan",
+    "adhan",
+    "azkar",
+    "quran",
+    "downloader"
+  ],
   "scripts": {
     "start": "node scripts/start.js",
     "setup": "node scripts/setup.js",
@@ -20,7 +30,8 @@
     "dist": "node scripts/build-helper.js && electron-builder --win --x64",
     "build:helper": "node scripts/build-helper.js",
     "fetch:ayat": "node scripts/fetch-ayat.js",
-    "test:prayer": "node scripts/test-prayer.js"
+    "test:prayer": "node scripts/test-prayer.js",
+    "test:downloads": "node scripts/test-downloads.js"
   },
   "devDependencies": {
     "electron": "44.10.1",
@@ -40,13 +51,26 @@
       "LICENSE"
     ],
     "extraResources": [
-      { "from": "native/bin/HilalHelper.exe", "to": "native/HilalHelper.exe" }
+      {
+        "from": "native/bin/HilalHelper.exe",
+        "to": "native/HilalHelper.exe"
+      }
     ],
     "asar": false,
-    "electronLanguages": ["en-US", "ar"],
+    "electronLanguages": [
+      "en-US",
+      "ar"
+    ],
     "compression": "maximum",
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "icon": "assets/icons/icon.ico",
       "artifactName": "Hilal-Setup-${version}.${ext}"
     },
@@ -55,7 +79,10 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "multiLanguageInstaller": true,
-      "installerLanguages": ["en_US", "ar_SA"],
+      "installerLanguages": [
+        "en_US",
+        "ar_SA"
+      ],
       "license": "LICENSE",
       "installerIcon": "assets/icons/icon.ico",
       "uninstallerIcon": "assets/icons/icon.ico",
