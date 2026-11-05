@@ -17,6 +17,10 @@ const S = {
   downloads: [],
   fullscreen: false,
   sound: { master: null, brightness: null, mixer: null }, // see sound.js
+  system: null, // see system.js
+  fps: null, // see system.js
+  mic: null, // see sound.js
+  playtime: null, // see system.js
 };
 
 const ui = {
@@ -48,6 +52,7 @@ const E = {
     prayer: $('#view-prayer'),
     azkar: $('#view-azkar'),
     sound: $('#view-sound'),
+    system: $('#view-system'),
     settings: $('#view-settings'),
   },
   reminder: $('#reminder'),
@@ -240,6 +245,7 @@ function setMode(mode) {
   renderCompact();
   setGeometry();
   if (typeof syncSoundWatch === 'function') syncSoundWatch(); // sound.js
+  if (typeof syncSystemWatch === 'function') syncSystemWatch(); // system.js
 }
 
 function contextualTab() {
@@ -359,9 +365,15 @@ function renderCompact() {
       ? `<div class="compact idle" dir="rtl">${ic('moon', 'gold')}<span class="c-name">${esc(np.name)}</span><span class="c-sub" dir="ltr">${fmtTime(np.time)}</span></div>`
       : '<div class="compact idle"><span class="c-idle-dot"></span></div>';
   }
+  // CPU / GPU readout after the usual content, if turned on (system.js fills in the numbers)
+  const readout = typeof sysReadoutHtml === 'function' ? sysReadoutHtml() : '';
+  // a red mic in front while the microphone is muted
+  const mic = S.mic && S.mic.muted ? `<span class="c-mic" title="Microphone muted">${ic('micOff')}</span>` : '';
+  if (readout || mic) html = `<div class="c-row">${mic}${html}${readout}</div>`;
   if (html !== ui.compactHtml) {
     ui.compactHtml = html;
     E.compact.innerHTML = html;
+    if (typeof updateSysReadout === 'function') updateSysReadout();
     if (ui.mode === 'compact') setGeometry();
   }
   renderBubble(ui.mode === 'compact' ? acts[1] : null);
@@ -401,7 +413,7 @@ function statusInfo() {
 
 function renderBar() {
   const st = statusInfo();
-  const tabs = [['music', 'music', 'Music'], ['sound', 'volume', 'Sound'], ['downloads', 'download', 'Downloads'], ['prayer', 'moon', 'Prayer'], ['azkar', 'book', 'Azkar']];
+  const tabs = [['music', 'music', 'Music'], ['sound', 'volume', 'Sound'], ['downloads', 'download', 'Downloads'], ['prayer', 'moon', 'Prayer'], ['azkar', 'book', 'Azkar'], ['system', 'activity', 'System']];
   const dlDot = activeDownloads().length > 0 && ui.tab !== 'downloads';
   const html = `<div class="status-chip ${st.cls}"><span class="dot"></span>${st.label}</div>
     <nav class="tabs">${tabs.map(([id, iconName, label]) => `<button class="tab${ui.tab === id ? ' active' : ''}" data-act="tab" data-tab="${id}" title="${label}">${ic(iconName)}<span class="label">${label}</span>${id === 'downloads' && dlDot ? '<span class="badge-dot"></span>' : ''}</button>`).join('')}</nav>
@@ -427,6 +439,7 @@ function renderExpanded() {
   for (const [k, v] of Object.entries(E.views)) v.classList.toggle('active', k === ui.tab);
   renderView(ui.tab);
   if (typeof syncSoundWatch === 'function') syncSoundWatch(); // sound.js
+  if (typeof syncSystemWatch === 'function') syncSystemWatch(); // system.js
 }
 
 function renderView(tab) {
@@ -435,6 +448,7 @@ function renderView(tab) {
   else if (tab === 'prayer') renderPrayer();
   else if (tab === 'azkar') renderAzkar();
   else if (tab === 'sound') renderSound();
+  else if (tab === 'system') renderSystem();
   else if (tab === 'settings') renderSettings(true);
 }
 
@@ -856,7 +870,7 @@ function section(title, iconName, rows, note = '') {
 
 function settingsStructureKey() {
   const s = S.settings;
-  return [s.location.cityId === 'custom', s.azan.voice === 'custom', s.azan.fajrVoice === 'custom', ui.showAdjust, s.azan.customFile, s.azan.fajrCustomFile, s.downloads.folder, ui.sheet && ui.sheet.id].join('|');
+  return [s.location.cityId === 'custom', s.azan.voice === 'custom', s.azan.fajrVoice === 'custom', ui.showAdjust, s.azan.customFile, s.azan.fajrCustomFile, s.downloads.folder, ui.sheet && ui.sheet.id, !!s.general.islandOffset, s.general.lockPosition, S.fps && S.fps.available, S.fps && S.fps.requested, S.mic && S.mic.muted, S.mic && S.mic.ok, S.mic && S.mic.shortcutOk, s.mic.shortcut, ui.recShortcut, ui.recPreview, ui.recError].join('|');
 }
 
 function renderSettings(force = false) {
@@ -929,14 +943,39 @@ function renderSettings(force = false) {
     row('Scroll to change the volume', 'Scroll on the island; hold Shift to change the screen brightness', switchHtml('general.scrollVolume')),
   ].join(''));
 
+  const fps = S.fps || {};
+  const mic = S.mic || {};
+  const microphone = section('Microphone', 'mic', [
+    row('Mute shortcut', typeof shortcutHelp === 'function' ? shortcutHelp(mic) : '', typeof shortcutControlHtml === 'function' ? shortcutControlHtml() : ''),
+    row('Microphone', mic.ok ? esc(mic.device || 'Default microphone') : 'No microphone found',
+      mic.ok ? `<button class="btn small${mic.muted ? ' danger' : ''}" data-act="mic-toggle">${ic(mic.muted ? 'micOff' : 'mic')}${mic.muted ? 'Unmute' : 'Mute'}</button>` : ''),
+    row('Sound when it changes', 'A short tone for muted and unmuted', switchHtml('mic.sound')),
+    row('Show over games while muted', 'A small red mic in the corner of fullscreen games', switchHtml('mic.overlay')),
+  ].join(''));
+
+  const bluetooth = section('Bluetooth devices', 'bluetooth', [
+    row('Show when a device connects', 'Your headphones or controller and their battery, for a few seconds', switchHtml('devices.connectPopup')),
+    row('Warn when a battery is low', 'Once at 20% and again at 10%', switchHtml('devices.lowBattery')),
+  ].join(''));
+
+  const system = section('System', 'activity', [
+    row('Show on the island', 'CPU use and GPU temperature (or memory) next to what the island shows', switchHtml('system.islandReadout')),
+    fps.available === true
+      ? row('FPS in games', 'A small counter over fullscreen games, instead of hiding the island', segHtml('system.fpsInGames', [['off', 'Off'], ['top-left', 'Top left'], ['top', 'Top'], ['top-right', 'Top right']]))
+      : row('FPS counter', typeof fpsHelp === 'function' ? fpsHelp(fps) : '', fps.requested && fps.reason === 'permission' ? '' : '<button class="btn small" data-act="fps-allow">Allow</button>'),
+  ].join(''));
+
   const general = section('General', 'settings', [
     row('Start with Windows', '', switchHtml('general.launchAtStartup')),
     row('Hide in fullscreen apps', 'Gets out of the way of games and videos (the azan still shows)', switchHtml('general.hideInFullscreen')),
+    row('Position', s.general.lockPosition ? 'Locked. Turn off Lock position to move it' : 'Drag the island up or down, or set it here',
+      `${rangeHtml('general.islandOffset', 0, Math.max(40, (window.screen.availHeight || 1040) - 540), 1).replace('<input', s.general.lockPosition ? '<input disabled' : '<input')}<button class="btn small" data-act="reset-position"${s.general.islandOffset && !s.general.lockPosition ? '' : ' disabled'}>Reset</button>`),
+    row('Lock position', 'Keeps the island where it is, so it can\'t be dragged by accident', switchHtml('general.lockPosition')),
     row('Hide the island', 'Bring it back from the tray icon', `<button class="btn small" data-act="hide-island">${ic('eyeOff')}Hide</button>`),
     row('Quit', `Hilal ${esc(S.meta.version)}`, `<button class="btn small danger" data-act="quit">${ic('power')}Quit</button>`),
   ].join(''));
 
-  v.innerHTML = `<div class="settings">${location}${azan}${azkar}${downloads}${sound}${general}</div>${ui.sheet ? sheetHtml() : ''}`;
+  v.innerHTML = `<div class="settings">${location}${azan}${azkar}${downloads}${sound}${microphone}${system}${bluetooth}${general}</div>${ui.sheet ? sheetHtml() : ''}`;
   const sc = v.querySelector('.settings');
   sc.scrollTop = scroll;
   if (ui.sheet) {
@@ -1272,15 +1311,76 @@ document.addEventListener('keydown', (e) => {
 // The closed island opens as soon as you press on it, not on "click": a click needs the press and
 // the release to land on the same element, and the compact content is redrawn every second while a
 // countdown or a download is showing, so a click that straddled a redraw used to be lost.
+// The closed island opens when you let go - unless you dragged it, which moves it up or down.
+// The island holds on to the pointer from press to release (pointer capture), so a click can't be
+// lost when the content under it is redrawn in between (the prayer countdown redraws every second).
 E.island.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
   api.activity(`press on the island (${ui.mode})`);
   if (e.target.closest('[data-act]')) return; // buttons do their own thing on click
+  if (ui.mode === 'compact' || ui.mode === 'osd') {
+    ui.press = { id: e.pointerId, y: e.screenY, offset: (S.settings && S.settings.general.islandOffset) || 0, moved: false, target: 0, raf: 0 };
+    try { E.island.setPointerCapture(e.pointerId); } catch { /* still works as a click */ }
+    return;
+  }
+  // Pressing a notice (not one of its buttons) opens what it is about.
+  if (ui.mode === 'toast' && ui.current && ui.current.toast) expand(ui.current.toast.tab);
+});
+
+E.island.addEventListener('pointermove', (e) => {
+  const p = ui.press;
+  if (!p || e.pointerId !== p.id) return;
+  const dy = e.screenY - p.y;
+  if (!p.moved && Math.abs(dy) < 5) return;
+  if (S.settings && S.settings.general.lockPosition) {
+    if (!p.locked) {
+      p.locked = true;
+      shakeIsland();
+    }
+    return;
+  }
+  if (!p.moved) {
+    p.moved = true;
+    E.island.classList.add('dragging');
+    E.island.classList.remove('peek');
+  }
+  p.target = Math.round(p.offset + dy);
+  if (!p.raf) {
+    p.raf = requestAnimationFrame(() => {
+      p.raf = 0;
+      if (ui.press === p) api.moveIsland(p.target, false);
+    });
+  }
+});
+
+function endPress(e, cancelled) {
+  const p = ui.press;
+  if (!p || (e && e.pointerId !== p.id)) return;
+  ui.press = null;
+  if (p.raf) cancelAnimationFrame(p.raf);
+  E.island.classList.remove('dragging');
+  if (p.moved) {
+    api.moveIsland(p.target, true);
+    return;
+  }
+  if (cancelled || p.locked) return;
   if (ui.mode === 'compact') expand();
   else if (ui.mode === 'osd') expand('sound');
-  // Pressing a notice (not one of its buttons) opens what it is about.
-  else if (ui.mode === 'toast' && ui.current && ui.current.toast) expand(ui.current.toast.tab);
+}
+
+// "Lock position" is on: a small shake says the island won't move.
+function shakeIsland() {
+  E.island.classList.remove('locked-shake');
+  void E.island.offsetWidth; // restart the animation
+  E.island.classList.add('locked-shake');
+}
+E.island.addEventListener('animationend', (e) => {
+  if (e.animationName === 'locked-shake') E.island.classList.remove('locked-shake');
 });
+
+E.island.addEventListener('pointerup', (e) => endPress(e, false));
+E.island.addEventListener('pointercancel', (e) => endPress(e, true));
+E.island.addEventListener('lostpointercapture', (e) => endPress(e, true));
 
 function openFromBubble() {
   const kind = E.bubble.dataset.kind;
@@ -1430,6 +1530,7 @@ document.addEventListener('click', async (e) => {
       break;
     case 'pick-folder': await api.settings.pickFolder(); break;
     case 'hide-island': collapse(); api.app.hide(); break;
+    case 'reset-position': api.settings.update({ general: { islandOffset: 0 } }); break;
     case 'quit': api.app.quit(); break;
     default: break;
   }
@@ -1488,6 +1589,9 @@ function tick() {
   S.downloads = st.downloads || [];
   S.fullscreen = st.fullscreen;
   if (st.sound) Object.assign(S.sound, st.sound);
+  if (st.fps) S.fps = st.fps;
+  if (st.devices) S.devices = st.devices;
+  if (st.mic) S.mic = st.mic;
   for (const [k, v] of Object.entries(st.thumbs || {})) {
     S.thumbs.set(k, v);
     extractColor(k, v);
@@ -1539,7 +1643,16 @@ function tick() {
   api.on('fullscreen', (v) => { S.fullscreen = v; });
   api.on('pointer', (over) => (over ? pointerEnter() : pointerLeave()));
   api.on('window:visible', (visible) => {
-    if (visible) { reportRects(); return; }
+    // Nothing is drawn while the island is off screen (the music bars would otherwise keep
+    // animating during a game). Coming back, measure everything again.
+    document.body.classList.toggle('away', !visible);
+    if (visible) {
+      ui.compactHtml = '';
+      renderCompact();
+      if (ui.mode === 'expanded') renderExpanded();
+      setGeometry();
+      return;
+    }
     // Hidden for a fullscreen app (or from the tray): come back as a calm, closed island.
     ui.hover = false;
     E.island.classList.remove('peek', 'hovering');

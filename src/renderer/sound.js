@@ -246,6 +246,13 @@ function hudHtml(kind, value, muted) {
 function showHud(kind, value, muted = false) {
   if (ui.mode === 'expanded') {
     // The island is open: the Sound tab shows it already; elsewhere, a short note in the status chip.
+    if (kind === 'mic') {
+      ui.flash = { label: muted ? 'Mic muted' : 'Mic on', until: Date.now() + 1600 };
+      renderBar();
+      clearTimeout(ui.flashTimer);
+      ui.flashTimer = setTimeout(renderBar, 1650);
+      return;
+    }
     if (ui.tab !== 'sound') {
       ui.flash = { label: `${kind === 'brightness' ? 'Brightness' : muted ? 'Muted' : 'Volume'} ${muted ? '' : `${value}%`}`.trim(), until: Date.now() + 1600 };
       renderBar();
@@ -256,7 +263,9 @@ function showHud(kind, value, muted = false) {
   }
   if (ui.mode !== 'compact' && ui.mode !== 'osd') return; // never over the azan or a notice
   const box = E.osd.querySelector('.osd');
-  if (box && box.classList.contains(kind)) {
+  if (kind === 'mic') {
+    E.osd.innerHTML = `<div class="osd mic${muted ? ' muted' : ''}">${ic(muted ? 'micOff' : 'mic')}<span class="osd-text">${muted ? 'Microphone muted' : 'Microphone on'}</span></div>`;
+  } else if (box && box.classList.contains(kind)) {
     box.classList.toggle('muted', !!muted);
     box.querySelector('.osd-bar > i').style.width = `${value}%`;
     box.querySelector('.osd-val').textContent = value;
@@ -323,3 +332,188 @@ api.on('brightness', (b) => {
   // Brightness keys on a laptop (changes made from the Sound tab are already on screen).
   else if (b.source === 'change' && S.settings && S.settings.general.volumeHud !== false) showHud('brightness', b.level);
 });
+
+// ------------------------------------------------------------------ microphone
+
+let micAudio = null;
+
+// Two short notes: falling for muted, rising for unmuted.
+function micTone(muted) {
+  try {
+    micAudio = micAudio || new AudioContext();
+    const t0 = micAudio.currentTime + 0.01;
+    (muted ? [880, 587] : [587, 880]).forEach((f, i) => {
+      const o = micAudio.createOscillator();
+      const g = micAudio.createGain();
+      o.type = 'sine';
+      o.frequency.value = f;
+      const t = t0 + i * 0.09;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.12, t + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+      o.connect(g).connect(micAudio.destination);
+      o.start(t);
+      o.stop(t + 0.18);
+    });
+  } catch { /* no sound */ }
+}
+
+api.on('mic', (m) => {
+  const was = S.mic ? !!S.mic.muted : null;
+  S.mic = m;
+  if (was !== !!m.muted) {
+    renderCompact(); // the red mic on the island
+    if (typeof updateFps === 'function') updateFps(); // and over a game
+  }
+  if (ui.mode === 'expanded' && ui.tab === 'settings') renderSettings(true);
+  // Your own press (shortcut, tray or button): say what happened.
+  if (['key', 'tray', 'island'].includes(m.source)) {
+    showHud('mic', 0, !!m.muted);
+    if (!S.settings || S.settings.mic.sound !== false) micTone(!!m.muted);
+  }
+});
+
+document.addEventListener('click', (e) => {
+  if (e.target.closest('[data-act="mic-toggle"]')) api.micToggle();
+});
+
+// ------------------------------------------------------- choosing the mute shortcut
+
+// KeyboardEvent.code -> Electron's key name (by position, so it works with any keyboard layout).
+const CODE_KEYS = {
+  Space: 'Space', Tab: 'Tab', Backspace: 'Backspace', Delete: 'Delete', Insert: 'Insert', Enter: 'Return',
+  ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', Home: 'Home', End: 'End',
+  PageUp: 'PageUp', PageDown: 'PageDown', ScrollLock: 'Scrolllock', PrintScreen: 'PrintScreen',
+  Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\',
+  Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/',
+  NumpadAdd: 'numadd', NumpadSubtract: 'numsub', NumpadMultiply: 'nummult', NumpadDivide: 'numdiv', NumpadDecimal: 'numdec',
+};
+
+function codeToKey(code) {
+  let m;
+  if ((m = /^Key([A-Z])$/.exec(code))) return m[1];
+  if ((m = /^Digit([0-9])$/.exec(code))) return m[1];
+  if ((m = /^Numpad([0-9])$/.exec(code))) return `num${m[1]}`;
+  if (/^F([1-9]|1\d|2[0-4])$/.test(code)) return code;
+  return CODE_KEYS[code] || null;
+}
+
+const SOLO = /^(F([1-9]|1\d|2[0-4])|Insert|Scrolllock|PrintScreen|num.+)$/;
+const KEY_LABELS = { Control: 'Ctrl', Super: 'Win', Scrolllock: 'Scroll Lock', PrintScreen: 'Print Screen', Return: 'Enter', PageUp: 'Page Up', PageDown: 'Page Down',
+  numadd: 'Num +', numsub: 'Num -', nummult: 'Num *', numdiv: 'Num /', numdec: 'Num .' };
+const keyLabel = (k) => KEY_LABELS[k] || (/^num\d$/.test(k) ? `Num ${k.slice(3)}` : k);
+
+function shortcutKeysHtml(accelerator) {
+  return accelerator.split('+').map((k) => `<kbd>${esc(keyLabel(k))}</kbd>`).join('');
+}
+
+function shortcutHelp(mic) {
+  if (ui.recShortcut) return ui.recError || 'Press the keys you want. Esc cancels';
+  if (mic.shortcutOk === false) return 'That shortcut is used by another app. Choose another one';
+  return 'Mutes your microphone in every app at once, even in games';
+}
+
+function shortcutControlHtml() {
+  const current = S.settings.mic.shortcut;
+  if (ui.recShortcut) {
+    return `<span class="kbd-chip rec">${ui.recPreview ? shortcutKeysHtml(ui.recPreview) + '<kbd class="more">...</kbd>' : '<span>Waiting for keys...</span>'}</span>`
+      + '<button class="btn small" data-act="shortcut-cancel">Cancel</button>';
+  }
+  return `<span class="kbd-chip">${current === 'off' ? '<span>Off</span>' : shortcutKeysHtml(current)}</span>`
+    + '<button class="btn small" data-act="shortcut-change">Change</button>'
+    + (current !== 'off' ? '<button class="btn small ghost" data-act="shortcut-off">Off</button>' : '');
+}
+
+function refreshShortcutRow() {
+  if (ui.mode === 'expanded' && ui.tab === 'settings') renderSettings(true);
+}
+
+async function startShortcutRecording() {
+  ui.recShortcut = true;
+  ui.recPreview = '';
+  ui.recError = '';
+  ui.inputFocused = true; // keep the island open while you press keys
+  api.micRecording(true); // let go of the current shortcut, so pressing it records it
+  await api.focusInput(true); // the island needs the keyboard for a moment
+  refreshShortcutRow();
+}
+
+function stopShortcutRecording() {
+  if (!ui.recShortcut) return;
+  ui.recShortcut = false;
+  ui.recPreview = '';
+  api.micRecording(false);
+  releaseFocus(); // hands the keyboard back to the app you were in
+  refreshShortcutRow();
+}
+
+document.addEventListener('keydown', async (e) => {
+  if (!ui.recShortcut) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (e.code === 'Escape') {
+    ui.recError = '';
+    stopShortcutRecording();
+    return;
+  }
+  const mods = [e.ctrlKey && 'Control', e.altKey && 'Alt', e.shiftKey && 'Shift', e.metaKey && 'Super'].filter(Boolean);
+  const key = codeToKey(e.code);
+  if (!key) {
+    // only modifiers so far (or a key that can't be used): show what's held
+    ui.recPreview = mods.join('+');
+    ui.recError = /^(Control|Alt|Shift|Meta|OS)/.test(e.code) ? '' : "That key can't be used. Try another";
+    refreshShortcutRow();
+    return;
+  }
+  if (!SOLO.test(key) && mods.length < 2) {
+    // one modifier with a letter is taken by other apps (Ctrl+C, Alt+F, ...)
+    ui.recPreview = '';
+    ui.recError = `Hold two of Ctrl, Alt and Shift with ${keyLabel(key)}, like Ctrl + Alt + ${keyLabel(key)}`;
+    refreshShortcutRow();
+    return;
+  }
+  if (key === 'F4' && mods.length === 1 && mods[0] === 'Alt') {
+    ui.recPreview = '';
+    ui.recError = 'Alt + F4 closes windows. Try another';
+    refreshShortcutRow();
+    return;
+  }
+  const accelerator = [...mods, key].join('+');
+  const r = await api.micSetShortcut(accelerator);
+  if (r && r.ok) {
+    ui.recError = '';
+    stopShortcutRecording();
+  } else {
+    ui.recPreview = '';
+    ui.recError = r && r.reason === 'taken'
+      ? `${accelerator.split('+').map(keyLabel).join(' + ')} is used by another app. Try another`
+      : "That shortcut can't be used. Try another";
+    refreshShortcutRow();
+  }
+}, true);
+
+document.addEventListener('keyup', (e) => {
+  if (!ui.recShortcut) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  const mods = [e.ctrlKey && 'Control', e.altKey && 'Alt', e.shiftKey && 'Shift', e.metaKey && 'Super'].filter(Boolean);
+  if (mods.join('+') !== ui.recPreview) {
+    ui.recPreview = mods.join('+');
+    refreshShortcutRow();
+  }
+}, true);
+
+document.addEventListener('click', async (e) => {
+  const t = e.target.closest('[data-act]');
+  if (!t) return;
+  if (t.dataset.act === 'shortcut-change') startShortcutRecording();
+  else if (t.dataset.act === 'shortcut-cancel') stopShortcutRecording();
+  else if (t.dataset.act === 'shortcut-off') {
+    await api.micSetShortcut('off');
+    refreshShortcutRow();
+  }
+});
+
+// clicked somewhere else: stop listening for keys
+api.on('window:blur', () => stopShortcutRecording());
+api.on('window:visible', (v) => { if (!v) stopShortcutRecording(); });

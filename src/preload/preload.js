@@ -4,7 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const CHANNELS = [
   'settings', 'prayer', 'media', 'thumb', 'downloads', 'download:done', 'download:failed', 'reminder', 'azan:start', 'azan:end',
   'prayer:pre-alert', 'clipboard:link', 'fullscreen', 'window:blur', 'ui:open', 'toast', 'pointer', 'window:visible',
-  'sound:volume', 'sound:mixer', 'sound:peaks', 'brightness',
+  'sound:volume', 'sound:mixer', 'sound:peaks', 'brightness', 'system', 'fps', 'game', 'devices', 'mic', 'playtime',
 ];
 
 contextBridge.exposeInMainWorld('island', {
@@ -16,11 +16,17 @@ contextBridge.exposeInMainWorld('island', {
     return () => ipcRenderer.removeListener(channel, handler);
   },
   reportRects: (rects) => ipcRenderer.send('island:rects', rects),
+  moveIsland: (offset, done) => ipcRenderer.send('island:move', { offset, done: !!done }),
   activity: (message) => ipcRenderer.send('activity', message),
   focusInput: (on) => ipcRenderer.invoke('focus-input', !!on),
   uiState: (state) => ipcRenderer.send('ui:state', state),
   media: (cmd, id, arg) => ipcRenderer.send('media', { cmd, id, arg }),
   sound: (cmd, value, pid) => ipcRenderer.send('sound', { cmd, value, pid }),
+  systemWatch: (on) => ipcRenderer.send('system:watch', !!on),
+  fpsAllow: () => ipcRenderer.invoke('fps:allow'),
+  micToggle: () => ipcRenderer.send('mic:toggle'),
+  micRecording: (on) => ipcRenderer.send('mic:recording', !!on),
+  micSetShortcut: (accelerator) => ipcRenderer.invoke('mic:setShortcut', accelerator),
   downloads: {
     add: (url) => ipcRenderer.invoke('dl:add', url),
     action: (id, action) => ipcRenderer.invoke('dl:action', { id, action }),

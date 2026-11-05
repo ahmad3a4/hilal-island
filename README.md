@@ -5,7 +5,7 @@
 # Hilal
 
 **A Dynamic Island for Windows.**<br>
-Your music, a volume mixer, your downloads, prayer times with the azan, and a verse or dhikr every few minutes, all in one small pill at the top of your screen.
+Your music, a volume mixer, a system monitor, your downloads, prayer times with the azan, and a verse or dhikr every few minutes, all in one small pill at the top of your screen.
 
 [**Download for Windows**](https://github.com/ahmad3a4/hilal-island/releases/latest) &nbsp;·&nbsp; [العربية](README.ar.md)
 
@@ -69,8 +69,21 @@ Works with any app that uses the Windows media controls, such as Spotify, YouTub
 - **A nicer volume pop-up.** Press the volume keys and the island shows the new volume instead of the Windows pop-up. In fullscreen games and videos the keys work as usual.
 - **Scroll on the island** to change the volume, or hold **Shift** while scrolling to change the brightness.
 - Brightness works on laptop screens and on most external monitors (through DDC/CI, which some monitors have to switch on in their own menu).
+- **Mute your microphone everywhere** with **Ctrl+Alt+K**, or any key combination you choose (Settings → Microphone → Change, then press your keys): Discord, games and browsers all go quiet at once. A red mic stays on the island while you're muted, also in the corner of fullscreen games, with a short tone when it changes.
 
 <img src="docs/screenshots/volume.png" width="60%" alt="The volume and brightness pop-ups on the island" />
+
+### System monitor
+
+<img src="docs/screenshots/system.png" alt="The System tab: CPU, memory, GPU and network with a one-minute graph, and free space on each drive" />
+
+- **CPU, memory, GPU and network at a glance**, each with a graph of the last minute. With an NVIDIA card you also see the GPU temperature and video memory.
+- **Free space on every drive**, in red when a drive is almost full.
+- Turn on Settings → System → **Show on the island** to keep CPU use and GPU temperature next to whatever the island is showing.
+- **FPS counter.** In fullscreen games, a small FPS counter appears in the corner you choose instead of the island. It reads Windows' own frame events, like Game Bar does, so nothing touches the game and it's safe with anti-cheat. Windows asks for an administrator's OK once (Settings → System → **Allow**), then you sign out and back in. Works with DirectX games.
+- **Bluetooth battery.** When your headphones, controller or mouse connect, the island shows it with the battery level, and it warns you at 20% and 10%. The System tab lists your Bluetooth devices. PlayStation controllers show their battery over USB, or over Bluetooth while Steam is running.
+- **Play time.** How long you played each game today and this week, with a 7-day chart in the System tab. It counts the games Windows knows (the same list Game Bar uses) and games in Steam, Epic and other game folders, while they're open in fullscreen. Videos and browsers never count.
+- It only takes readings while you're looking (or while that readout is on), and never during fullscreen games.
 
 ### Downloads
 
@@ -86,7 +99,7 @@ Works with any app that uses the Windows media controls, such as Spotify, YouTub
 
 <img src="docs/screenshots/settings.png" alt="The settings panel" />
 
-Everything is in the island itself (the gear icon): location and calculation method, azan voice, length and volume, which prayers have an azan, how often reminders appear, the download folder, the volume pop-up, start with Windows, and more.
+Everything is in the island itself (the gear icon): location and calculation method, azan voice, length and volume, which prayers have an azan, how often reminders appear, the download folder, the volume pop-up, the island's position, start with Windows, and more.
 
 The interface is in English. Prayer names, verses and azkar are in Arabic.
 
@@ -108,7 +121,9 @@ Requires Windows 10 or 11, 64-bit. No admin rights needed.
 |---|---|
 | Open the panel | Click the island |
 | Close it | Move the mouse away, or press Esc |
+| Move it up or down | Drag the island. Settings → *Position* puts it back, and *Lock position* keeps it in place |
 | Change the volume | Scroll on the island (hold Shift for brightness), or use the volume keys |
+| Mute your microphone | Ctrl+Alt+K, or the tray icon |
 | Pause the pop-ups for a while | Tray icon → *Pause reminders for 1 hour* |
 | Stop the azan | The **إيقاف الأذان** button, or the tray icon |
 | Hide the island | Tray icon → *Hide the island* |
@@ -143,7 +158,7 @@ src/main/        Electron main process
 src/renderer/    the island itself (HTML, CSS, JavaScript)
 native/          HilalHelper.cs, a small C# program that reads and controls
                  Windows media sessions, the volume of each app and the screen
-                 brightness, and detects fullscreen apps
+                 brightness, reads the GPU and network, and detects fullscreen apps
 assets/          fonts, azan recordings, verses, azkar, icon
 ```
 

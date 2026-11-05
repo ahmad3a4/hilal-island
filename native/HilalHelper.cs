@@ -37,6 +37,8 @@ namespace HilalHelper
             try { AudioMuter.RecoverFromCrash(); } catch (Exception ex) { Out.Log("recover: " + ex.Message); }
             Media.Start();
             Sound.Start();
+            Mic.Attach();
+            BtDevices.Start();
             FullscreenWatcher.Start();
             Out.Send("{\"type\":\"ready\"}");
 
@@ -52,6 +54,7 @@ namespace HilalHelper
 
             // Parent closed the pipe or asked us to quit: never leave other apps muted.
             try { AudioMuter.UnmuteAll(); } catch { }
+            try { Fps.Watch(false); } catch { }
             return 0;
         }
     }
@@ -98,6 +101,13 @@ namespace HilalHelper
                 case "appmute": Sound.MuteApp(uint.Parse(arg, CultureInfo.InvariantCulture), p.Length > 2 && p[2] == "1"); break;
                 case "brightness": Brightness.Query(); break;
                 case "setbrightness": Brightness.Set(int.Parse(arg, CultureInfo.InvariantCulture)); break;
+                case "sysmon": SystemMonitor.Watch(arg == "1"); break;
+                case "fps": Fps.Watch(arg == "1"); break;
+                case "fpsprobe": Fps.Probe(); break;
+                case "micget": Mic.Send("query"); break;
+                case "micmute": Mic.Set(arg == "1", p.Length > 2 ? p[2] : "island"); break;
+                case "mictoggle": Mic.Toggle(arg.Length > 0 ? arg : "key"); break;
+                case "devices": ThreadPool.QueueUserWorkItem(delegate { BtDevices.Refresh(true); }); break;
                 default: Out.Log("unknown command: " + cmd); break;
             }
         }
@@ -450,6 +460,8 @@ namespace HilalHelper
             timer = new Timer(delegate { Check(); }, null, 300, 700);
         }
 
+        static uint lastPid;
+
         static void Check()
         {
             int state = 0;
@@ -458,10 +470,53 @@ namespace HilalHelper
             try { front = ForegroundCoversMainScreen(); } catch { }
             // 4 = "presentation mode", which you switch on yourself in Windows
             int fs = (front || state == 4) ? 1 : 0;
-            if (fs == last) return;
+            IntPtr fg = GetForegroundWindow();
+            uint pid = 0;
+            try { GetWindowThreadProcessId(fg, out pid); } catch { }
+            // Report changes, and also a different app taking over while still fullscreen.
+            if (fs == last && (fs == 0 || pid == lastPid)) return;
             last = fs;
+            lastPid = pid;
             Out.Send("{\"type\":\"fullscreen\",\"value\":" + (fs == 1 ? "true" : "false") + ",\"state\":" + state
-                + ",\"window\":" + Json.Str(DescribeForeground()) + "}");
+                + ",\"window\":" + Json.Str(DescribeForeground()) + ",\"app\":" + AppInfo(fg, pid) + "}");
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
+        [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageName(IntPtr h, int flags, StringBuilder name, ref int size);
+
+        // The app in front, for play time: its exe, full path, window title and product name.
+        static string AppInfo(IntPtr fg, uint pid)
+        {
+            string exe = "", file = "", title = "", product = "";
+            try
+            {
+                var t = new StringBuilder(160);
+                GetWindowText(fg, t, t.Capacity);
+                title = t.ToString().Trim();
+                IntPtr h = OpenProcess(0x1000 /* PROCESS_QUERY_LIMITED_INFORMATION */, false, pid);
+                if (h != IntPtr.Zero)
+                {
+                    var sb = new StringBuilder(1024);
+                    int size = sb.Capacity;
+                    if (QueryFullProcessImageName(h, 0, sb, ref size)) file = sb.ToString();
+                    CloseHandle(h);
+                }
+                if (file.Length > 0)
+                {
+                    exe = Path.GetFileNameWithoutExtension(file);
+                    try
+                    {
+                        var v = FileVersionInfo.GetVersionInfo(file);
+                        product = (v.ProductName ?? "").Trim();
+                        if (product.Length == 0) product = (v.FileDescription ?? "").Trim();
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return "{\"pid\":" + pid + ",\"exe\":" + Json.Str(exe) + ",\"path\":" + Json.Str(file) + ",\"title\":" + Json.Str(title) + ",\"product\":" + Json.Str(product) + "}";
         }
 
         // For Hilal's activity log: which window was in front when this changed.
@@ -648,7 +703,7 @@ namespace HilalHelper
             if (watchTimer != null) SendMixer(true);
         }
 
-        static string FriendlyName(IMMDevice device)
+        public static string FriendlyName(IMMDevice device)
         {
             try
             {
@@ -970,6 +1025,8 @@ namespace HilalHelper
         {
             // Only the speakers/headphones you hear from; never do audio work inside this callback.
             if (flow == 0 && role == 0) ThreadPool.QueueUserWorkItem(delegate { Sound.Attach(); });
+            // the microphone (for apps or for calls) changed
+            if (flow == 1 && (role == 0 || role == 2)) ThreadPool.QueueUserWorkItem(delegate { Mic.Attach(); });
             return 0;
         }
     }
@@ -1027,6 +1084,820 @@ namespace HilalHelper
                 }
             }
             return CallNextHookEx(hook, code, wParam, lParam);
+        }
+    }
+
+    // --------------------------------------------------------- system monitor
+
+    // GPU use, temperature and memory (NVIDIA through NVML; other GPUs: Windows' own "GPU Engine"
+    // counters, the ones Task Manager shows, without temperature), network speed and free disk
+    // space. Hilal reads CPU and memory itself. Runs only while Hilal asks for it.
+    static class SystemMonitor
+    {
+        [StructLayout(LayoutKind.Sequential)] struct NvmlUtilization { public uint gpu, memory; }
+        [StructLayout(LayoutKind.Sequential)] struct NvmlMemory { public ulong total, free, used; }
+        [DllImport("nvml.dll")] static extern int nvmlInit_v2();
+        [DllImport("nvml.dll")] static extern int nvmlDeviceGetCount_v2(out uint count);
+        [DllImport("nvml.dll")] static extern int nvmlDeviceGetHandleByIndex_v2(uint index, out IntPtr device);
+        [DllImport("nvml.dll")] static extern int nvmlDeviceGetTemperature(IntPtr device, int sensor, out uint temp);
+        [DllImport("nvml.dll")] static extern int nvmlDeviceGetUtilizationRates(IntPtr device, out NvmlUtilization util);
+        [DllImport("nvml.dll")] static extern int nvmlDeviceGetMemoryInfo(IntPtr device, out NvmlMemory mem);
+        [DllImport("nvml.dll", CharSet = CharSet.Ansi)] static extern int nvmlDeviceGetName(IntPtr device, StringBuilder name, uint length);
+
+        static readonly object Gate = new object();
+        static Timer timer;
+        static int ticks;
+        static int nvml; // 0 = not tried yet, 1 = working, -1 = not available
+        static IntPtr gpu;
+        static string gpuName = "";
+        static Dictionary<string, PerformanceCounter> engines;
+        static DateTime enginesAt;
+        static long lastRx = -1, lastTx = -1;
+        static DateTime lastNet;
+
+        public static void Watch(bool on)
+        {
+            lock (Gate)
+            {
+                if (timer != null) { timer.Dispose(); timer = null; }
+                if (!on) return;
+                ticks = 0;
+                lastRx = -1;
+                timer = new Timer(delegate { Tick(); }, null, 0, 1000);
+            }
+        }
+
+        static void Tick()
+        {
+            lock (Gate)
+            {
+                if (timer == null) return;
+                var sb = new StringBuilder("{\"type\":\"sysmon\"");
+                sb.Append(",\"gpu\":").Append(Gpu());
+                sb.Append(",\"net\":").Append(Net());
+                if (ticks++ % 10 == 0) sb.Append(",\"disks\":").Append(Disks());
+                sb.Append('}');
+                Out.Send(sb.ToString());
+            }
+        }
+
+        static string N(ulong v) { return v.ToString(CultureInfo.InvariantCulture); }
+
+        static string Gpu()
+        {
+            if (nvml == 0)
+            {
+                nvml = -1;
+                try
+                {
+                    uint count;
+                    if (nvmlInit_v2() == 0 && nvmlDeviceGetCount_v2(out count) == 0 && count > 0 && nvmlDeviceGetHandleByIndex_v2(0, out gpu) == 0)
+                    {
+                        var name = new StringBuilder(96);
+                        if (nvmlDeviceGetName(gpu, name, 96) == 0) gpuName = name.ToString();
+                        nvml = 1;
+                    }
+                }
+                catch { } // no NVIDIA driver: nvml.dll isn't there
+                if (nvml != 1) gpuName = VideoCardName();
+            }
+            if (nvml == 1)
+            {
+                uint temp;
+                NvmlUtilization u;
+                NvmlMemory m;
+                bool hasTemp = nvmlDeviceGetTemperature(gpu, 0 /* NVML_TEMPERATURE_GPU */, out temp) == 0;
+                bool hasUse = nvmlDeviceGetUtilizationRates(gpu, out u) == 0;
+                bool hasMem = nvmlDeviceGetMemoryInfo(gpu, out m) == 0;
+                return "{\"name\":" + Json.Str(gpuName)
+                    + ",\"util\":" + (hasUse ? N(u.gpu) : "null")
+                    + ",\"temp\":" + (hasTemp ? N(temp) : "null")
+                    + ",\"memUsed\":" + (hasMem ? N(m.used) : "null")
+                    + ",\"memTotal\":" + (hasMem ? N(m.total) : "null") + "}";
+            }
+            double use = EngineUse();
+            if (use < 0) return "null";
+            return "{\"name\":" + Json.Str(gpuName) + ",\"util\":" + Json.Num(Math.Round(use)) + ",\"temp\":null,\"memUsed\":null,\"memTotal\":null}";
+        }
+
+        static string VideoCardName()
+        {
+            try
+            {
+                using (var s = new ManagementObjectSearcher("SELECT Name FROM Win32_VideoController"))
+                    foreach (ManagementObject o in s.Get()) return Convert.ToString(o["Name"], CultureInfo.InvariantCulture) ?? "";
+            }
+            catch { }
+            return "";
+        }
+
+        // Sum of the 3D engines across processes, like Task Manager's GPU graph.
+        static double EngineUse()
+        {
+            try
+            {
+                if (engines == null || (DateTime.UtcNow - enginesAt).TotalSeconds > 10)
+                {
+                    var next = new Dictionary<string, PerformanceCounter>();
+                    foreach (string n in new PerformanceCounterCategory("GPU Engine").GetInstanceNames())
+                    {
+                        if (!n.EndsWith("engtype_3D", StringComparison.OrdinalIgnoreCase)) continue;
+                        PerformanceCounter c;
+                        if (engines == null || !engines.TryGetValue(n, out c))
+                        {
+                            c = new PerformanceCounter("GPU Engine", "Utilization Percentage", n, true);
+                            c.NextValue();
+                        }
+                        next[n] = c;
+                    }
+                    if (engines != null) foreach (var kv in engines) if (!next.ContainsKey(kv.Key)) kv.Value.Dispose();
+                    engines = next;
+                    enginesAt = DateTime.UtcNow;
+                }
+                double sum = 0;
+                foreach (var c in engines.Values) { try { sum += c.NextValue(); } catch { } }
+                return Math.Min(100, sum);
+            }
+            catch { return -1; }
+        }
+
+        // Bytes per second over the real network adapters (not loopback, VPN tunnels or virtual
+        // switches, which would count the same traffic twice).
+        static string Net()
+        {
+            long rx = 0, tx = 0;
+            try
+            {
+                foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                    var t = ni.NetworkInterfaceType;
+                    if (t == System.Net.NetworkInformation.NetworkInterfaceType.Loopback || t == System.Net.NetworkInformation.NetworkInterfaceType.Tunnel) continue;
+                    string d = (ni.Description ?? "").ToLowerInvariant();
+                    if (d.Contains("virtual") || d.Contains("hyper-v") || d.Contains("vmware") || d.Contains("virtualbox") || d.Contains("tap-") || d.Contains("vpn") || d.Contains("wireguard")) continue;
+                    var s = ni.GetIPv4Statistics();
+                    rx += s.BytesReceived;
+                    tx += s.BytesSent;
+                }
+            }
+            catch { return "null"; }
+            DateTime now = DateTime.UtcNow;
+            string result = "null";
+            if (lastRx >= 0)
+            {
+                double secs = (now - lastNet).TotalSeconds;
+                if (secs > 0.2)
+                    result = "{\"rx\":" + Json.Num(Math.Max(0, Math.Round((rx - lastRx) / secs))) + ",\"tx\":" + Json.Num(Math.Max(0, Math.Round((tx - lastTx) / secs))) + "}";
+            }
+            lastRx = rx;
+            lastTx = tx;
+            lastNet = now;
+            return result;
+        }
+
+        static string Disks()
+        {
+            var sb = new StringBuilder("[");
+            bool first = true;
+            try
+            {
+                foreach (var d in DriveInfo.GetDrives())
+                {
+                    if (d.DriveType != DriveType.Fixed || !d.IsReady) continue;
+                    if (!first) sb.Append(',');
+                    first = false;
+                    string label = "";
+                    try { label = d.VolumeLabel; } catch { }
+                    sb.Append("{\"name\":").Append(Json.Str(d.Name.TrimEnd('\\')))
+                      .Append(",\"label\":").Append(Json.Str(label))
+                      .Append(",\"total\":").Append(d.TotalSize.ToString(CultureInfo.InvariantCulture))
+                      .Append(",\"free\":").Append(d.AvailableFreeSpace.ToString(CultureInfo.InvariantCulture)).Append('}');
+                }
+            }
+            catch { }
+            return sb.Append(']').ToString();
+        }
+    }
+
+    // -------------------------------------------------------------------- fps
+
+    // Frames per second of the app in front, measured the way Game Bar and PresentMon do it: from
+    // Windows' own trace events for every frame a DirectX app presents. Nothing touches the game.
+    // Windows allows this only for administrators and members of "Performance Log Users"; Hilal
+    // can add you to that group once, after which it works without admin rights.
+    static class Fps
+    {
+        const string SessionName = "Hilal FPS";
+        static readonly Guid SessionGuid = new Guid("3c6f1a52-6b0e-4d0a-9a8e-6e5b0f2a7c11");
+        static readonly Guid DxgiProvider = new Guid("CA11C036-0102-4A2D-A6AD-F03CFED5D3C9"); // Microsoft-Windows-DXGI
+        static readonly Guid D3d9Provider = new Guid("783ACA0A-790E-4D7F-8451-AA850511C6B9"); // Microsoft-Windows-D3D9
+        const int DxgiData1 = unchecked((int)0xCA11C036);
+        const int D3d9Data1 = unchecked((int)0x783ACA0A);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] static extern int StartTrace(out ulong handle, string name, IntPtr properties);
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] static extern int ControlTrace(ulong handle, string name, IntPtr properties, uint code);
+        [DllImport("advapi32.dll")] static extern int EnableTraceEx2(ulong handle, ref Guid provider, uint controlCode, byte level, ulong matchAny, ulong matchAll, uint timeout, IntPtr parameters);
+        [DllImport("advapi32.dll", EntryPoint = "OpenTraceW", SetLastError = true)] static extern ulong OpenTrace(IntPtr logfile);
+        [DllImport("advapi32.dll")] static extern int ProcessTrace(ulong[] handles, uint count, IntPtr start, IntPtr end);
+        [DllImport("advapi32.dll")] static extern int CloseTrace(ulong handle);
+        [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
+
+        delegate void EventRecordCallback(IntPtr record);
+        static readonly EventRecordCallback Callback = OnEvent; // must stay referenced while tracing
+
+        // EVENT_TRACE_PROPERTIES (120 bytes on 64-bit) followed by room for the session name,
+        // and EVENT_TRACE_LOGFILEW (448 bytes on 64-bit). Written field by field at fixed offsets.
+        const int PropsSize = 120 + 512;
+        const int LogfileSize = 448;
+
+        static readonly object Gate = new object();
+        static Dictionary<uint, int> counts = new Dictionary<uint, int>();
+        static readonly Dictionary<uint, string> names = new Dictionary<uint, string>();
+        static readonly Stopwatch clock = new Stopwatch();
+        static IntPtr props, logfile, loggerName;
+        static ulong session, trace;
+        static Thread reader;
+        static Timer timer;
+        static bool running;
+
+        // Can we trace at all? Starts and stops a session right away.
+        public static void Probe()
+        {
+            lock (Gate)
+            {
+                if (running) { Report("{\"type\":\"fps\",\"available\":true}"); return; }
+                string why = Open();
+                if (why == null) Close();
+                Report(why == null ? "{\"type\":\"fps\",\"available\":true}" : Unavailable(why));
+            }
+        }
+
+        public static void Watch(bool on)
+        {
+            lock (Gate)
+            {
+                if (on && !running)
+                {
+                    string why = Open();
+                    if (why != null) { Report(Unavailable(why)); return; }
+                    running = true;
+                    lock (counts) counts = new Dictionary<uint, int>();
+                    clock.Restart();
+                    timer = new Timer(delegate { Tick(); }, null, 1000, 1000);
+                }
+                else if (!on && running)
+                {
+                    running = false;
+                    if (timer != null) { timer.Dispose(); timer = null; }
+                    Close();
+                }
+            }
+        }
+
+        static string Unavailable(string why)
+        {
+            return "{\"type\":\"fps\",\"available\":false,\"reason\":" + Json.Str(why) + "}";
+        }
+
+        static void Report(string json) { Out.Send(json); }
+
+        static void ResetProps()
+        {
+            for (int i = 0; i < PropsSize; i += 4) Marshal.WriteInt32(props, i, 0);
+            Marshal.WriteInt32(props, 0, PropsSize);                       // Wnode.BufferSize
+            Marshal.Copy(SessionGuid.ToByteArray(), 0, props + 24, 16);   // Wnode.Guid
+            Marshal.WriteInt32(props, 40, 1);                              // Wnode.ClientContext: QPC clock
+            Marshal.WriteInt32(props, 44, 0x00020000);                     // Wnode.Flags: WNODE_FLAG_TRACED_GUID
+            Marshal.WriteInt32(props, 48, 64);                             // BufferSize (KB)
+            Marshal.WriteInt32(props, 64, 0x00000100);                     // LogFileMode: EVENT_TRACE_REAL_TIME_MODE
+            Marshal.WriteInt32(props, 68, 1);                              // FlushTimer: every second
+            Marshal.WriteInt32(props, 116, 120);                           // LoggerNameOffset
+        }
+
+        // Returns null when tracing started, otherwise why it couldn't.
+        static string Open()
+        {
+            if (IntPtr.Size != 8) return "unsupported";
+            props = Marshal.AllocHGlobal(PropsSize);
+            ResetProps();
+            ControlTrace(0, SessionName, props, 1 /* EVENT_TRACE_CONTROL_STOP */); // one left over from a crash
+            ResetProps();
+            int err = StartTrace(out session, SessionName, props);
+            if (err != 0)
+            {
+                Marshal.FreeHGlobal(props);
+                props = IntPtr.Zero;
+                return err == 5 ? "permission" : "error " + err;
+            }
+            Guid g = DxgiProvider;
+            EnableTraceEx2(session, ref g, 1 /* ENABLE */, 4 /* information */, ulong.MaxValue, 0, 0, IntPtr.Zero);
+            g = D3d9Provider;
+            EnableTraceEx2(session, ref g, 1, 4, ulong.MaxValue, 0, 0, IntPtr.Zero);
+
+            logfile = Marshal.AllocHGlobal(LogfileSize);
+            for (int i = 0; i < LogfileSize; i += 4) Marshal.WriteInt32(logfile, i, 0);
+            loggerName = Marshal.StringToHGlobalUni(SessionName);
+            Marshal.WriteIntPtr(logfile, 8, loggerName);                   // LoggerName
+            Marshal.WriteInt32(logfile, 28, 0x00000100 | 0x10000000);      // REAL_TIME | EVENT_RECORD
+            Marshal.WriteIntPtr(logfile, 424, Marshal.GetFunctionPointerForDelegate(Callback)); // EventRecordCallback
+            trace = OpenTrace(logfile);
+            if (trace == ulong.MaxValue)
+            {
+                int e = Marshal.GetLastWin32Error();
+                Close();
+                return "error open " + e;
+            }
+            ulong handle = trace;
+            reader = new Thread(delegate()
+            {
+                try { ProcessTrace(new[] { handle }, 1, IntPtr.Zero, IntPtr.Zero); }
+                catch (Exception ex) { Out.Log("fps: " + ex.Message); }
+            });
+            reader.IsBackground = true;
+            reader.Start();
+            return null;
+        }
+
+        static void Close()
+        {
+            if (props != IntPtr.Zero)
+            {
+                ResetProps();
+                ControlTrace(0, SessionName, props, 1 /* EVENT_TRACE_CONTROL_STOP */); // also ends ProcessTrace
+            }
+            if (trace != 0 && trace != ulong.MaxValue) CloseTrace(trace);
+            trace = 0;
+            if (reader != null) { reader.Join(3000); reader = null; }
+            if (props != IntPtr.Zero) { Marshal.FreeHGlobal(props); props = IntPtr.Zero; }
+            if (logfile != IntPtr.Zero) { Marshal.FreeHGlobal(logfile); logfile = IntPtr.Zero; }
+            if (loggerName != IntPtr.Zero) { Marshal.FreeHGlobal(loggerName); loggerName = IntPtr.Zero; }
+        }
+
+        // Called for every traced event. EVENT_RECORD starts with EVENT_HEADER:
+        // ProcessId at 12, ProviderId at 24, EventDescriptor.Id at 40.
+        static void OnEvent(IntPtr record)
+        {
+            int provider = Marshal.ReadInt32(record, 24);
+            int id = (ushort)Marshal.ReadInt16(record, 40);
+            bool present = (provider == DxgiData1 && (id == 42 || id == 55)) // Present_Start, PresentMultiplaneOverlay_Start
+                        || (provider == D3d9Data1 && id == 1);                // D3D9 Present_Start
+            if (!present) return;
+            uint pid = (uint)Marshal.ReadInt32(record, 12);
+            lock (counts)
+            {
+                int c;
+                counts.TryGetValue(pid, out c);
+                counts[pid] = c + 1;
+            }
+        }
+
+        static string NameOf(uint pid)
+        {
+            string name;
+            lock (names)
+            {
+                if (names.TryGetValue(pid, out name)) return name;
+                try { name = Process.GetProcessById((int)pid).ProcessName; } catch { name = "?"; }
+                if (names.Count > 200) names.Clear();
+                names[pid] = name;
+                return name;
+            }
+        }
+
+        // Once a second: the app in front, and the three apps drawing the most frames.
+        static void Tick()
+        {
+            Dictionary<uint, int> snap;
+            double secs;
+            lock (counts)
+            {
+                snap = counts;
+                counts = new Dictionary<uint, int>();
+                secs = clock.Elapsed.TotalSeconds;
+                clock.Restart();
+            }
+            if (secs < 0.2) return;
+            uint fg = 0;
+            string title = "";
+            try
+            {
+                IntPtr w = GetForegroundWindow();
+                GetWindowThreadProcessId(w, out fg);
+                var t = new StringBuilder(128);
+                GetWindowText(w, t, t.Capacity);
+                title = t.ToString().Trim();
+            }
+            catch { }
+            int frames;
+            snap.TryGetValue(fg, out frames);
+            var top = new List<KeyValuePair<uint, int>>(snap);
+            top.Sort(delegate(KeyValuePair<uint, int> a, KeyValuePair<uint, int> b) { return b.Value.CompareTo(a.Value); });
+            var sb = new StringBuilder("{\"type\":\"fps\",\"available\":true,\"pid\":");
+            sb.Append(fg).Append(",\"app\":").Append(Json.Str(fg != 0 ? NameOf(fg) : "")).Append(",\"title\":").Append(Json.Str(title))
+              .Append(",\"fps\":").Append(Json.Num(Math.Round(frames / secs))).Append(",\"top\":[");
+            for (int i = 0; i < top.Count && i < 3; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append("{\"pid\":").Append(top[i].Key).Append(",\"app\":").Append(Json.Str(NameOf(top[i].Key)))
+                  .Append(",\"fps\":").Append(Json.Num(Math.Round(top[i].Value / secs))).Append('}');
+            }
+            sb.Append("]}");
+            Report(sb.ToString());
+        }
+    }
+
+    // ------------------------------------------------------- bluetooth devices
+
+    // Paired Bluetooth devices: connected or not, and their battery where Windows knows it
+    // (headphones, most mice, keyboards and Xbox controllers). PlayStation controllers don't tell
+    // Windows; their battery is read from the controller's own reports (see SonyBattery).
+    static class BtDevices
+    {
+        const string ClassicProtocol = "{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}";
+        const string LeProtocol = "{bb7bb05e-5972-42b5-94fc-76eaa7084d49}";
+        const string BatteryKey = "{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2"; // DEVPKEY_Bluetooth_Battery
+        static readonly object Gate = new object();
+        static Timer timer;
+        static Windows.Devices.Enumeration.DeviceWatcher watcher;
+        static int pending;
+        static string last = "";
+
+        public static void Start()
+        {
+            try
+            {
+                string aqs = "(System.Devices.Aep.ProtocolId:=\"" + ClassicProtocol + "\" OR System.Devices.Aep.ProtocolId:=\"" + LeProtocol + "\")"
+                    + " AND System.Devices.Aep.IsPaired:=System.StructuredQueryType.Boolean#True";
+                watcher = Windows.Devices.Enumeration.DeviceInformation.CreateWatcher(aqs,
+                    new[] { "System.Devices.Aep.IsConnected" }, Windows.Devices.Enumeration.DeviceInformationKind.AssociationEndpoint);
+                watcher.Added += delegate { Soon(); };
+                watcher.Updated += delegate { Soon(); };
+                watcher.Removed += delegate { Soon(); };
+                watcher.Start();
+            }
+            catch (Exception ex) { Out.Log("bluetooth watch: " + ex.Message); }
+            // Battery levels change without any event, so look again every 30 seconds.
+            timer = new Timer(delegate { Refresh(false); }, null, 1500, 30000);
+        }
+
+        // Connect/disconnect: refresh shortly after (several events arrive together), and never
+        // more often than every 5 seconds, however chatty a device is.
+        static DateTime lastRefresh = DateTime.MinValue;
+
+        static void Soon()
+        {
+            if (Interlocked.Exchange(ref pending, 1) == 1) return;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                int wait = Math.Max(1200, 5000 - (int)(DateTime.UtcNow - lastRefresh).TotalMilliseconds);
+                Thread.Sleep(Math.Min(wait, 5000));
+                Interlocked.Exchange(ref pending, 0);
+                Refresh(false);
+            });
+        }
+
+        public static void Refresh(bool force)
+        {
+            lock (Gate)
+            {
+                lastRefresh = DateTime.UtcNow;
+                string json;
+                try { json = List(); }
+                catch (Exception ex) { Out.Log("bluetooth: " + ex.Message); return; }
+                if (!force && json == last) return;
+                last = json;
+                Out.Send(json);
+            }
+        }
+
+        static object Prop(Windows.Devices.Enumeration.DeviceInformation d, string key)
+        {
+            object v;
+            return d.Properties.TryGetValue(key, out v) ? v : null;
+        }
+
+        static string List()
+        {
+            string aqs = "(System.Devices.Aep.ProtocolId:=\"" + ClassicProtocol + "\" OR System.Devices.Aep.ProtocolId:=\"" + LeProtocol + "\")"
+                + " AND System.Devices.Aep.IsPaired:=System.StructuredQueryType.Boolean#True";
+            var props = new[] { "System.Devices.Aep.IsConnected", "System.Devices.Aep.ContainerId", "System.Devices.Aep.Bluetooth.Cod.Major", "System.Devices.Aep.Bluetooth.Cod.Minor", "System.Devices.Aep.Category", "System.Devices.Aep.DeviceAddress" };
+            var eps = Async.Await(Windows.Devices.Enumeration.DeviceInformation.FindAllAsync(aqs, props, Windows.Devices.Enumeration.DeviceInformationKind.AssociationEndpoint), 8000);
+            var sony = SonyBattery.Read(); // container id -> battery from PlayStation controllers
+            var seen = new HashSet<string>();
+            var sb = new StringBuilder("{\"type\":\"devices\",\"list\":[");
+            bool first = true;
+            foreach (var ep in eps)
+            {
+                object c = Prop(ep, "System.Devices.Aep.ContainerId");
+                string container = c != null ? c.ToString() : ep.Id;
+                if (!seen.Add(container)) continue; // classic + LE entries of the same device
+                bool connected = Prop(ep, "System.Devices.Aep.IsConnected") as bool? ?? false;
+                int battery = -1;
+                bool charging = false;
+                if (connected && c != null) battery = BatteryOf(container);
+                SonyBattery.Level s;
+                if (connected && sony.TryGetValue(NormalizeGuid(container), out s)) { battery = s.Percent; charging = s.Charging; }
+                object major = Prop(ep, "System.Devices.Aep.Bluetooth.Cod.Major");
+                object minor = Prop(ep, "System.Devices.Aep.Bluetooth.Cod.Minor");
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append("{\"id\":").Append(Json.Str(container))
+                  .Append(",\"name\":").Append(Json.Str(ep.Name))
+                  .Append(",\"connected\":").Append(Json.Bool(connected))
+                  .Append(",\"battery\":").Append(battery >= 0 ? battery.ToString(CultureInfo.InvariantCulture) : "null")
+                  .Append(",\"charging\":").Append(Json.Bool(charging))
+                  .Append(",\"major\":").Append(major != null ? Convert.ToString(major, CultureInfo.InvariantCulture) : "null")
+                  .Append(",\"minor\":").Append(minor != null ? Convert.ToString(minor, CultureInfo.InvariantCulture) : "null")
+                  .Append('}');
+            }
+            return sb.Append("]}").ToString();
+        }
+
+        static string NormalizeGuid(string s)
+        {
+            Guid g;
+            return Guid.TryParse(s, out g) ? g.ToString("D") : s.ToLowerInvariant();
+        }
+
+        // The battery lives on one of the device's nodes (the hands-free one for headphones,
+        // the HID or LE node for other devices); take the first that has it.
+        static int BatteryOf(string container)
+        {
+            try
+            {
+                string aqs = "System.Devices.ContainerId:=\"{" + NormalizeGuid(container) + "}\"";
+                var nodes = Async.Await(Windows.Devices.Enumeration.DeviceInformation.FindAllAsync(aqs, new[] { BatteryKey },
+                    Windows.Devices.Enumeration.DeviceInformationKind.Device), 5000);
+                foreach (var n in nodes)
+                {
+                    object v = Prop(n, BatteryKey);
+                    if (v != null) return Convert.ToInt32(v, CultureInfo.InvariantCulture);
+                }
+            }
+            catch { }
+            return -1;
+        }
+    }
+
+    // PlayStation controllers (DualShock 4, DualSense) report their battery only inside their input
+    // reports. We read one report, without changing anything on the controller: over USB the
+    // battery is always there; over Bluetooth only when another app (Steam, for example) has
+    // already switched the controller to its full reports.
+    static class SonyBattery
+    {
+        public struct Level { public int Percent; public bool Charging; }
+
+        [StructLayout(LayoutKind.Sequential)] struct HIDD_ATTRIBUTES { public int Size; public ushort VendorID, ProductID, VersionNumber; }
+        [StructLayout(LayoutKind.Sequential)] struct SP_DEVICE_INTERFACE_DATA { public int cbSize; public Guid InterfaceClassGuid; public int Flags; public IntPtr Reserved; }
+        [DllImport("hid.dll")] static extern void HidD_GetHidGuid(out Guid guid);
+        [DllImport("hid.dll")] static extern bool HidD_GetAttributes(IntPtr handle, ref HIDD_ATTRIBUTES attributes);
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode)] static extern IntPtr SetupDiGetClassDevs(ref Guid classGuid, IntPtr enumerator, IntPtr parent, int flags);
+        [DllImport("setupapi.dll")] static extern bool SetupDiEnumDeviceInterfaces(IntPtr set, IntPtr info, ref Guid classGuid, int index, ref SP_DEVICE_INTERFACE_DATA data);
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode)] static extern bool SetupDiGetDeviceInterfaceDetail(IntPtr set, ref SP_DEVICE_INTERFACE_DATA data, IntPtr detail, int size, out int required, IntPtr info);
+        [DllImport("setupapi.dll")] static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool ReadFile(IntPtr file, byte[] buffer, int count, out int read, ref NativeOverlapped overlapped);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetOverlappedResult(IntPtr file, ref NativeOverlapped overlapped, out int read, bool wait);
+        [DllImport("kernel32.dll")] static extern bool CancelIo(IntPtr file);
+        [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint ms);
+        [DllImport("kernel32.dll")] static extern IntPtr CreateEvent(IntPtr security, bool manualReset, bool initialState, string name);
+
+        static readonly ushort[] DualShock4 = { 0x05C4, 0x09CC, 0x0BA0 };
+        static readonly ushort[] DualSense = { 0x0CE6, 0x0DF2 };
+
+        // Container id (lower-case "D" format) -> battery
+        public static Dictionary<string, Level> Read()
+        {
+            var result = new Dictionary<string, Level>();
+            Guid hid;
+            HidD_GetHidGuid(out hid);
+            IntPtr set = SetupDiGetClassDevs(ref hid, IntPtr.Zero, IntPtr.Zero, 0x12 /* DIGCF_PRESENT | DIGCF_DEVICEINTERFACE */);
+            if (set == new IntPtr(-1)) return result;
+            try
+            {
+                for (int i = 0; ; i++)
+                {
+                    var data = new SP_DEVICE_INTERFACE_DATA();
+                    data.cbSize = Marshal.SizeOf(typeof(SP_DEVICE_INTERFACE_DATA));
+                    if (!SetupDiEnumDeviceInterfaces(set, IntPtr.Zero, ref hid, i, ref data)) break;
+                    string path = PathOf(set, ref data);
+                    if (path == null) continue;
+                    string p = path.ToLowerInvariant();
+                    if (!p.Contains("054c")) continue; // Sony
+                    try { TryOne(path, result); } catch { }
+                }
+            }
+            finally { SetupDiDestroyDeviceInfoList(set); }
+            return result;
+        }
+
+        static string PathOf(IntPtr set, ref SP_DEVICE_INTERFACE_DATA data)
+        {
+            int size;
+            SetupDiGetDeviceInterfaceDetail(set, ref data, IntPtr.Zero, 0, out size, IntPtr.Zero);
+            if (size <= 0) return null;
+            IntPtr buf = Marshal.AllocHGlobal(size);
+            try
+            {
+                Marshal.WriteInt32(buf, IntPtr.Size == 8 ? 8 : 6); // cbSize of SP_DEVICE_INTERFACE_DETAIL_DATA_W
+                if (!SetupDiGetDeviceInterfaceDetail(set, ref data, buf, size, out size, IntPtr.Zero)) return null;
+                return Marshal.PtrToStringUni(buf + 4);
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+        }
+
+        static void TryOne(string path, Dictionary<string, Level> result)
+        {
+            // No read/write access requested beyond reading; shared with everyone else.
+            IntPtr h = CreateFile(path, 0x80000000 /* GENERIC_READ */, 3 /* SHARE_READ | SHARE_WRITE */, IntPtr.Zero, 3 /* OPEN_EXISTING */, 0x40000000 /* OVERLAPPED */, IntPtr.Zero);
+            if (h == new IntPtr(-1)) return;
+            try
+            {
+                var attr = new HIDD_ATTRIBUTES { Size = Marshal.SizeOf(typeof(HIDD_ATTRIBUTES)) };
+                if (!HidD_GetAttributes(h, ref attr) || attr.VendorID != 0x054C) return;
+                bool ds4 = Array.IndexOf(DualShock4, attr.ProductID) >= 0;
+                bool ds = Array.IndexOf(DualSense, attr.ProductID) >= 0;
+                if (!ds4 && !ds) return;
+                byte[] report = ReadReport(h, 600);
+                if (report == null) return;
+                // Bluetooth HID paths carry the HID service id (00001124-...); USB ones don't.
+                bool bluetooth = path.ToLowerInvariant().Contains("00001124");
+                Level level;
+                if (!Parse(report, ds4, bluetooth, out level)) return;
+                string container = ContainerOf(path);
+                if (container != null) result[container] = level;
+            }
+            finally { CloseHandle(h); }
+        }
+
+        static byte[] ReadReport(IntPtr h, uint timeoutMs)
+        {
+            var buffer = new byte[600];
+            IntPtr ev = CreateEvent(IntPtr.Zero, true, false, null);
+            try
+            {
+                var ov = new NativeOverlapped { EventHandle = ev };
+                int read;
+                if (!ReadFile(h, buffer, buffer.Length, out read, ref ov))
+                {
+                    if (Marshal.GetLastWin32Error() != 997 /* ERROR_IO_PENDING */) return null;
+                    if (WaitForSingleObject(ev, timeoutMs) != 0) { CancelIo(h); GetOverlappedResult(h, ref ov, out read, true); return null; }
+                    if (!GetOverlappedResult(h, ref ov, out read, false)) return null;
+                }
+                var r = new byte[read];
+                Array.Copy(buffer, r, read);
+                return r;
+            }
+            finally { CloseHandle(ev); }
+        }
+
+        // Battery from the report layouts documented by the Linux hid-playstation and DS4Windows code.
+        static bool Parse(byte[] r, bool ds4, bool bluetooth, out Level level)
+        {
+            level = new Level();
+            int at;
+            if (ds4)
+            {
+                if (!bluetooth && r.Length >= 64 && r[0] == 0x01) at = 30;       // USB
+                else if (bluetooth && r.Length >= 78 && r[0] == 0x11) at = 32;  // Bluetooth, full reports
+                else return false;                                              // Bluetooth, basic reports: no battery
+                int raw = r[at] & 0x0F;
+                bool cable = (r[at] & 0x10) != 0;
+                level.Percent = raw < 10 ? raw * 10 + 5 : 100;
+                level.Charging = cable && raw < 10;
+                return true;
+            }
+            if (!bluetooth && r.Length >= 64 && r[0] == 0x01) at = 53;           // USB
+            else if (bluetooth && r.Length >= 78 && r[0] == 0x31) at = 54;      // Bluetooth, full reports
+            else return false;
+            int lvl = r[at] & 0x0F;
+            int status = r[at] >> 4;
+            level.Percent = status == 2 ? 100 : Math.Min(100, lvl * 10 + 5);
+            level.Charging = status == 1;
+            return true;
+        }
+
+        static string ContainerOf(string path)
+        {
+            try
+            {
+                var d = Async.Await(Windows.Devices.Enumeration.DeviceInformation.CreateFromIdAsync(path, new[] { "System.Devices.ContainerId" },
+                    Windows.Devices.Enumeration.DeviceInformationKind.DeviceInterface), 3000);
+                object v;
+                if (d.Properties.TryGetValue("System.Devices.ContainerId", out v) && v != null) return ((Guid)v).ToString("D");
+            }
+            catch { }
+            return null;
+        }
+    }
+
+    // -------------------------------------------------------------- microphone
+
+    // Mutes the microphone itself (the default recording device, for apps and for calls), so
+    // every app goes quiet at once. Reports changes made anywhere, e.g. in Windows' own settings.
+    static class Mic
+    {
+        static readonly object Gate = new object();
+        static IMMDeviceEnumerator enumerator;
+        static List<IAudioEndpointVolume> endpoints = new List<IAudioEndpointVolume>();
+        static readonly MicCallback Callback = new MicCallback();
+        static string deviceName = "";
+
+        public static void Attach()
+        {
+            lock (Gate)
+            {
+                foreach (var ep in endpoints) { try { ep.UnregisterControlChangeNotify(Callback); } catch { } }
+                endpoints = new List<IAudioEndpointVolume>();
+                deviceName = "";
+                try
+                {
+                    if (enumerator == null) enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+                    var ids = new HashSet<string>();
+                    foreach (int role in new[] { 0 /* eConsole */, 2 /* eCommunications */ })
+                    {
+                        try
+                        {
+                            IMMDevice device;
+                            enumerator.GetDefaultAudioEndpoint(1 /* eCapture */, role, out device);
+                            string id;
+                            device.GetId(out id);
+                            if (!ids.Add(id)) continue;
+                            if (deviceName.Length == 0) deviceName = Sound.FriendlyName(device);
+                            object o;
+                            Guid iid = typeof(IAudioEndpointVolume).GUID;
+                            device.Activate(ref iid, 23, IntPtr.Zero, out o);
+                            var ep = (IAudioEndpointVolume)o;
+                            ep.RegisterControlChangeNotify(Callback);
+                            endpoints.Add(ep);
+                        }
+                        catch { } // no microphone for this role
+                    }
+                }
+                catch (Exception ex) { Out.Log("mic: " + ex.Message); }
+            }
+            Send("device");
+        }
+
+        static bool IsMuted()
+        {
+            if (endpoints.Count == 0) return false;
+            foreach (var ep in endpoints)
+            {
+                bool m;
+                try { ep.GetMute(out m); } catch { return false; }
+                if (!m) return false;
+            }
+            return true;
+        }
+
+        public static void Set(bool mute, string source)
+        {
+            lock (Gate)
+            {
+                Guid ctx = Sound.HilalContext;
+                foreach (var ep in endpoints) { try { ep.SetMute(mute, ref ctx); } catch (Exception ex) { Out.Log("mic: " + ex.Message); } }
+            }
+            Send(source);
+        }
+
+        public static void Toggle(string source)
+        {
+            bool muted;
+            lock (Gate) muted = IsMuted();
+            Set(!muted, source);
+        }
+
+        public static void Send(string source)
+        {
+            bool ok, muted;
+            string name;
+            lock (Gate)
+            {
+                ok = endpoints.Count > 0;
+                muted = IsMuted();
+                name = deviceName;
+            }
+            Out.Send("{\"type\":\"mic\",\"ok\":" + Json.Bool(ok) + ",\"muted\":" + Json.Bool(muted) + ",\"device\":" + Json.Str(name) + ",\"source\":" + Json.Str(source) + "}");
+        }
+    }
+
+    [ComVisible(true)]
+    class MicCallback : IAudioEndpointVolumeCallback
+    {
+        public int OnNotify(IntPtr data)
+        {
+            try
+            {
+                var n = (AUDIO_VOLUME_NOTIFICATION_DATA)Marshal.PtrToStructure(data, typeof(AUDIO_VOLUME_NOTIFICATION_DATA));
+                // Changes made elsewhere (our own were reported already). No audio calls in here.
+                if (n.guidEventContext != Sound.HilalContext) ThreadPool.QueueUserWorkItem(delegate { Mic.Send("change"); });
+            }
+            catch { }
+            return 0;
         }
     }
 

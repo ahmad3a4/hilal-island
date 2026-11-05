@@ -71,6 +71,16 @@ button:focus-visible, input:focus-visible { outline: 2px solid rgba(75, 163, 255
 .island[data-mode="compact"], .island[data-mode="osd"] { cursor: pointer; }
 .island[data-mode="compact"].peek { scale: 1.045; }
 .island[data-mode="compact"]:active { scale: 0.97; }
+.island.dragging, .island.dragging:active { scale: 1.06; cursor: grabbing; transition: scale 0.25s var(--spring); }
+.island.locked-shake { animation: locked-shake 0.32s ease; }
+@keyframes locked-shake {
+  0%, 100% { translate: -50% 0; }
+  20% { translate: calc(-50% - 5px) 0; }
+  40% { translate: calc(-50% + 5px) 0; }
+  60% { translate: calc(-50% - 3px) 0; }
+  80% { translate: calc(-50% + 2px) 0; }
+}
+.range:disabled { opacity: 0.35; pointer-events: none; }
 .island.hidden-mode { scale: 0.6; opacity: 0; }
 
 .layer {
@@ -479,3 +489,128 @@ button.snd-btn:hover { background: rgba(255, 255, 255, 0.16); }
 .mx-row.muted .snd-main { opacity: 0.45; }
 .mx-mute.on { color: var(--red); background: rgba(255, 107, 107, 0.12); }
 .mx-empty { padding: 18px; text-align: center; color: var(--text-2); font-size: 12.5px; }
+
+/* ------------------------------------------------------------ system tab */
+.sys { max-height: 404px; overflow-y: auto; margin-right: -10px; padding-right: 10px; }
+.sys-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+.sys-card { --c: #ffffff; min-width: 0; padding: 12px 14px 10px; border-radius: 16px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+.sys-card.cpu { --c: #4ba3ff; }
+.sys-card.mem { --c: #a78bfa; }
+.sys-card.gpu { --c: #3ddc97; }
+.sys-card.net { --c: #3ddc97; }
+.sys-head { display: flex; align-items: center; gap: 8px; }
+.sys-ic { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; flex: none; color: var(--c); background: color-mix(in srgb, var(--c) 16%, transparent); }
+.sys-ic .ic { width: 14px; height: 14px; }
+.sys-head b { font-weight: 600; font-size: 13px; }
+.sys-big { margin-left: auto; font-family: var(--font-display); font-weight: 700; font-size: 19px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sys-sub { margin-top: 4px; font-size: 11.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.spark { display: block; width: 100%; height: 34px; margin-top: 8px; overflow: visible; }
+.spark .line { fill: none; stroke: var(--c); stroke-width: 1.6; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; }
+.spark .area { fill: color-mix(in srgb, var(--c) 15%, transparent); stroke: none; }
+.spark .line.tx { stroke: #4ba3ff; }
+.sys-temp { padding: 2px 7px; border-radius: 10px; font-size: 11.5px; font-weight: 700; font-variant-numeric: tabular-nums; background: var(--card-2); }
+.sys-temp.cool { color: var(--green); background: var(--green-soft); }
+.sys-temp.warm { color: var(--gold); background: var(--gold-soft); }
+.sys-temp.hot { color: var(--red); background: rgba(255, 107, 107, 0.14); }
+.s-title .sys-up { margin-left: auto; color: var(--text-3); font-weight: 600; letter-spacing: 0; text-transform: none; }
+.sys-disks { border-radius: 16px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+.sys-disk { display: grid; grid-template-columns: auto auto 1fr auto; align-items: center; gap: 12px; padding: 11px 14px; border-top: 1px solid var(--line); }
+.sys-disk:first-child { border-top: 0; }
+.sys-disk b { font-weight: 700; font-size: 13px; }
+.sys-disk-label { font-size: 12px; color: var(--text-2); }
+.sys-bar { height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+.sys-bar > i { display: block; height: 100%; border-radius: inherit; background: #4ba3ff; }
+.sys-disk.low .sys-bar > i { background: var(--red); }
+.sys-disk-free { font-size: 12px; color: var(--text-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* nothing drawn while the island is off screen or the FPS counter replaces it */
+body.away #stage, body.game #stage { display: none; }
+
+/* FPS counter over fullscreen games (the window is just this big then) */
+.fps-pill { display: none; position: fixed; top: 8px; left: 8px; height: 32px; padding: 0 12px 0 13px; align-items: center; gap: 5px; border-radius: 16px; background: rgba(0, 0, 0, 0.78); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 4px 14px rgba(0, 0, 0, 0.4); color: var(--green); transition: opacity 0.3s; white-space: nowrap; }
+body.game .fps-pill { display: flex; }
+body[data-corner="top-right"] .fps-pill { left: auto; right: 8px; }
+body[data-corner="top"] .fps-pill { left: 50%; translate: -50% 0; }
+.fps-pill b { font-family: var(--font-display); font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 28px; text-align: right; }
+.fps-pill span { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; color: var(--text-2); }
+.fps-pill.mid { color: var(--gold); }
+.fps-pill.low { color: var(--red); }
+.fps-pill.idle { opacity: 0; }
+
+/* FPS row in the System tab */
+.sys-fps { display: flex; align-items: center; gap: 10px; min-height: 52px; margin-bottom: 10px; padding: 10px 14px; border-radius: 16px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); --c: #3ddc97; }
+.sys-fps .sys-ic { color: var(--c); background: color-mix(in srgb, var(--c) 16%, transparent); }
+.sys-fps-text { flex: 1; min-width: 0; }
+.sys-fps-text b { font-weight: 600; font-size: 13px; }
+.sys-fps-text span { display: block; font-size: 11.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sys-fps .sys-big small { font-size: 11px; font-weight: 700; color: var(--text-2); margin-left: 3px; }
+.sys-fps.mid { --c: #f3c36b; }
+.sys-fps.low { --c: #ff6b6b; }
+
+/* CPU / GPU readout on the closed island */
+.c-row { display: flex; align-items: center; }
+.c-sys { display: flex; align-items: center; gap: 10px; height: 20px; margin-left: -4px; padding: 0 14px 0 10px; border-left: 1px solid rgba(255, 255, 255, 0.14); white-space: nowrap; }
+.c-sys > span { display: flex; align-items: baseline; gap: 4px; }
+.c-sys small { font-size: 9.5px; font-weight: 700; letter-spacing: 0.4px; color: var(--text-3); }
+.c-sys b { min-width: 30px; font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.c-sys b.cool { color: var(--green); }
+.c-sys b.warm { color: var(--gold); }
+.c-sys b.hot { color: var(--red); }
+
+/* Bluetooth devices in the System tab */
+[data-devices] > .s-title { margin-top: 16px; }
+.sys-devs { border-radius: 16px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+.dev { display: grid; grid-template-columns: 26px minmax(0, 220px) 1fr auto; align-items: center; gap: 12px; padding: 10px 14px; border-top: 1px solid var(--line); }
+.dev:first-child { border-top: 0; }
+.dev.off { opacity: 0.55; }
+.dev-ic { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; color: var(--blue); background: rgba(75, 163, 255, 0.14); }
+.dev-ic .ic { width: 14px; height: 14px; }
+.dev b { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dev-state { grid-column: 3 / 5; justify-self: end; font-size: 12px; color: var(--text-2); }
+.dev-bar > i { background: var(--green); }
+.dev-bar.low > i { background: var(--red); }
+.dev-pct { display: flex; align-items: center; gap: 3px; min-width: 42px; justify-content: flex-end; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.dev-pct .ic { width: 12px; height: 12px; color: var(--gold); }
+.dev-pct.low { color: var(--red); }
+
+/* microphone */
+.c-mic { display: grid; place-items: center; width: 26px; height: 26px; margin-left: 6px; margin-right: -8px; border-radius: 50%; background: rgba(255, 107, 107, 0.16); color: var(--red); flex: none; }
+.c-mic .ic { width: 14px; height: 14px; }
+.osd.mic { justify-content: center; gap: 10px; }
+.osd.mic > .ic { color: var(--green); }
+.osd.mic.muted > .ic { color: var(--red); }
+.osd-text { font-weight: 600; font-size: 13.5px; color: var(--text); }
+.fps-mic { display: none; color: var(--red); }
+.fps-mic .ic { width: 16px; height: 16px; }
+.fps-pill.mic-off .fps-mic { display: grid; place-items: center; }
+.fps-pill.no-fps b, .fps-pill.no-fps #fps-label { display: none; }
+.fps-pill.no-fps { padding: 0 9px; }
+
+/* play time */
+[data-playtime] > .s-title { margin-top: 0; }
+[data-playtime]:not(:empty) { margin-bottom: 16px; }
+.pt { display: grid; grid-template-columns: 190px 1fr; gap: 14px; padding: 12px 14px; border-radius: 16px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+.pt-week { display: flex; align-items: flex-end; gap: 6px; height: 92px; }
+.pt-day { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; }
+.pt-day i { width: 100%; max-width: 18px; border-radius: 4px; background: rgba(167, 139, 250, 0.45); }
+.pt-day.today i { background: #a78bfa; }
+.pt-day span { font-size: 10px; color: var(--text-3); font-weight: 600; }
+.pt-day.today span { color: var(--text-2); }
+.pt-games { display: flex; flex-direction: column; gap: 6px; min-width: 0; justify-content: center; }
+.pt-game { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto auto auto; align-items: center; gap: 8px; }
+.pt-ic { width: 24px; height: 24px; border-radius: 6px; display: grid; place-items: center; background: var(--card-2); color: #a78bfa; overflow: hidden; }
+.pt-ic img { width: 20px; height: 20px; }
+.pt-ic .ic { width: 13px; height: 13px; }
+.pt-game b { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pt-live { font-size: 10px; font-weight: 700; color: var(--green); background: var(--green-soft); padding: 1px 6px; border-radius: 8px; }
+.pt-t { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pt-t.muted { color: var(--text-2); font-weight: 600; }
+.pt-t small { font-size: 10px; font-weight: 600; color: var(--text-3); }
+
+/* the mute shortcut */
+.kbd-chip { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 0 4px; border-radius: 9px; }
+.kbd-chip span { font-size: 12px; color: var(--text-2); padding: 0 6px; }
+.kbd-chip kbd { font: 600 11.5px var(--font); min-width: 24px; height: 24px; padding: 0 7px; display: grid; place-items: center; border-radius: 7px; background: rgba(255, 255, 255, 0.1); box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.08); color: var(--text); }
+.kbd-chip kbd.more { background: none; box-shadow: none; color: var(--text-3); padding: 0 2px; min-width: 0; }
+.kbd-chip.rec { box-shadow: 0 0 0 1.5px var(--blue); animation: rec-pulse 1.4s ease-in-out infinite; padding: 0 6px; }
+@keyframes rec-pulse { 50% { box-shadow: 0 0 0 1.5px rgba(75, 163, 255, 0.35); } }

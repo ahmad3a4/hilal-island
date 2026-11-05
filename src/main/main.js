@@ -1,16 +1,18 @@
 'use strict';
 const {
-  app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, shell, dialog, clipboard, powerMonitor,
+  app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, shell, dialog, clipboard, powerMonitor, globalShortcut,
 } = require('electron');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { pathToFileURL } = require('url');
-const { Settings } = require('./settings');
+const { Settings, isShortcut } = require('./settings');
 const { Helper } = require('./helper');
 const { DownloadManager } = require('./downloads');
 const { PrayerScheduler, Reminders } = require('./scheduler');
 const { METHODS, NAMES_AR, NAMES_EN } = require('./prayer');
 const { CITIES, nearestCity } = require('./cities');
+const { PlayTime } = require('./playtime');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const ASSETS = path.join(ROOT, 'assets');
@@ -83,6 +85,7 @@ let azanTimeout = null;
 let quitting = false;
 let demoNoMedia = false;
 let demoSound = false; // screenshots: sample mixer instead of this PC's apps
+let demoSystem = null; // screenshots: sample system readings
 const state = { media: { current: null, sessions: [] }, sound: { master: null, brightness: null }, uiMode: 'compact', fullscreen: false, azan: null, hiddenByUser: false, forceShow: false, uiBusy: false };
 const thumbs = new Map();
 
@@ -113,9 +116,19 @@ function meta() {
   };
 }
 
+// You can drag the island down from the top edge; the whole window must still fit on the screen.
+let dragOffset = null; // while you drag it
+let islandDragging = false;
+
+function islandOffset() {
+  const { height } = screen.getPrimaryDisplay().workArea;
+  const want = dragOffset != null ? dragOffset : (settings ? settings.get().general.islandOffset : 0);
+  return Math.round(Math.min(Math.max(Number(want) || 0, 0), Math.max(0, height - WIN_H)));
+}
+
 function islandBounds() {
   const { x, y, width } = screen.getPrimaryDisplay().workArea;
-  return { x: Math.round(x + (width - WIN_W) / 2), y, width: WIN_W, height: WIN_H };
+  return { x: Math.round(x + (width - WIN_W) / 2), y: y + islandOffset(), width: WIN_W, height: WIN_H };
 }
 
 // Where the window waits while the island is hidden: just left of the leftmost screen, so it
@@ -176,7 +189,75 @@ function createWindow() {
 
 function reposition() {
   if (!win || win.isDestroyed()) return;
-  win.setBounds(islandShown ? islandBounds() : parkedBounds());
+  win.setBounds(islandShown ? islandBounds() : gameOverlay ? overlayBounds() : parkedBounds());
+}
+
+// ------------------------------------------------------------------- fps
+
+// Over a fullscreen game the island is replaced by a small FPS counter in a corner, if FPS is
+// available (see Fps in the helper) and turned on. The window then shrinks to just that counter.
+const OVERLAY_W = 132;
+const OVERLAY_H = 52;
+let gameOverlay = false;
+let fpsOn = false;
+const fpsState = { available: null, reason: '', app: '', title: '', fps: null };
+
+function overlayCorner() {
+  const corner = settings.get().system.fpsInGames;
+  return corner === 'off' ? 'top-left' : corner; // the mic alone goes top left
+}
+
+function overlayBounds() {
+  const b = screen.getPrimaryDisplay().bounds;
+  const corner = overlayCorner();
+  const x = corner === 'top-right' ? b.x + b.width - OVERLAY_W - 10
+    : corner === 'top' ? Math.round(b.x + (b.width - OVERLAY_W) / 2) : b.x + 10;
+  return { x, y: b.y + 8, width: OVERLAY_W, height: OVERLAY_H };
+}
+
+function gameOverlayWanted() {
+  const s = settings.get();
+  const fps = fpsState.available === true && s.system.fpsInGames !== 'off';
+  const mic = !!(state.mic && state.mic.muted && s.mic.overlay);
+  return !DEMO && (fps || mic) && state.fullscreen && !state.hiddenByUser && !state.azan && s.general.hideInFullscreen;
+}
+
+// Frames are counted only while the System tab is open or the counter is over a game.
+function syncFpsWatch() {
+  if (!helper) return;
+  const want = fpsState.available === true && (systemTab || gameOverlay);
+  if (want === fpsOn) return;
+  fpsOn = want;
+  helper.send('fps', want ? '1' : '0');
+}
+
+function sendFps() {
+  send('fps', { ...fpsState, requested: settings.get().system.fpsRequested, inGames: settings.get().system.fpsInGames });
+}
+
+// Adds you to Windows' "Performance Log Users" group (by SID, so it works in any Windows
+// language), which is what lets an app read frame timing without admin rights. Windows asks
+// for an administrator's OK, and it takes effect after you sign out and back in.
+async function allowFps() {
+  const { execFile, spawn } = require('child_process');
+  const sid = await new Promise((resolve) => {
+    // Windows' own whoami (another one, e.g. Git's, can come first on the PATH)
+    const whoami = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'whoami.exe');
+    execFile(whoami, ['/user', '/fo', 'csv', '/nh'], { windowsHide: true }, (err, out) => resolve(err ? null : (/"(S-1-[\d-]+)"/.exec(out) || [])[1]));
+  });
+  if (!sid) return { ok: false };
+  const inner = `try { Add-LocalGroupMember -SID 'S-1-5-32-559' -Member '${sid}' -ErrorAction Stop; exit 0 } catch { if ("$_" -match 'already a member' -or $_.FullyQualifiedErrorId -like '*MemberExists*') { exit 0 }; exit 1 }`;
+  const encoded = Buffer.from(inner, 'utf16le').toString('base64');
+  const outer = `try { $p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-EncodedCommand','${encoded}'; exit $p.ExitCode } catch { exit 2 }`;
+  const code = await new Promise((resolve) => {
+    const p = spawn('powershell.exe', ['-NoProfile', '-Command', outer], { windowsHide: true });
+    p.on('exit', (c) => resolve(c));
+    p.on('error', () => resolve(3));
+  });
+  activity(`FPS permission: ${code === 0 ? 'added to Performance Log Users' : code === 2 ? 'cancelled' : `failed (${code})`}`);
+  if (code === 0) settings.update({ system: { fpsRequested: true } });
+  if (helper) helper.send('fpsprobe');
+  return { ok: code === 0, cancelled: code === 2 };
 }
 
 function shouldHide() {
@@ -195,9 +276,11 @@ function shouldHide() {
 function updateVisibility() {
   if (!win || win.isDestroyed()) return;
   const show = !shouldHide();
+  const overlay = !show && gameOverlayWanted();
   const first = !win.isVisible();
-  if (show === islandShown && !first) return;
+  if (show === islandShown && overlay === gameOverlay && !first) return;
   islandShown = show;
+  gameOverlay = overlay;
   setPointerOver(false);
   win.setIgnoreMouseEvents(true);
   pointerOver = false;
@@ -205,10 +288,13 @@ function updateVisibility() {
   if (first) win.showInactive();
   win.setAlwaysOnTop(true, 'screen-saver');
   if (show) activity(`island shown at ${rect(win.getBounds())}${state.forceShow ? ' (over a fullscreen app, from the tray)' : ''}`);
-  else activity(`island hidden (${state.hiddenByUser ? 'from the tray' : 'fullscreen app'})`);
+  else activity(`island hidden (${state.hiddenByUser ? 'from the tray' : 'fullscreen app'})${overlay ? ', FPS counter shown' : ''}`);
+  send('game', { on: overlay, corner: overlayCorner() }); // before 'visible': the page measures the island then
   send('window:visible', show);
   rebuildTrayMenu();
   syncVolumeKeys();
+  syncSysmon();
+  syncFpsWatch();
 }
 
 // ------------------------------------------------------------ sound & brightness
@@ -248,6 +334,194 @@ function syncWheelZone() {
   helper.send('wheelzone', px.x, px.y, px.width, px.height);
 }
 
+// -------------------------------------------------------------- microphone
+
+// A shortcut mutes the microphone in every app at once (the helper mutes the recording device).
+state.mic = null;
+let micShortcut = null; // the accelerator registered now
+let micShortcutOk = true;
+
+function syncMicShortcut() {
+  const want = settings.get().mic.shortcut;
+  if (want === micShortcut) return;
+  if (micShortcut) globalShortcut.unregister(micShortcut);
+  micShortcut = null;
+  micShortcutOk = true;
+  if (want !== 'off' && !DEMO) {
+    try {
+      micShortcutOk = globalShortcut.register(want, () => helper && helper.send('mictoggle', 'key'));
+    } catch { micShortcutOk = false; }
+    if (micShortcutOk) micShortcut = want;
+    else activity(`mic shortcut ${want} is taken by another app`);
+  }
+  sendMic();
+}
+
+// Choosing a new shortcut in Settings: the old one is let go meanwhile, so pressing it records it.
+function pauseMicShortcut(paused) {
+  if (paused) {
+    if (micShortcut) globalShortcut.unregister(micShortcut);
+    micShortcut = null;
+  } else {
+    syncMicShortcut();
+  }
+}
+
+// Takes the shortcut only if no other app has it.
+function setMicShortcut(accelerator) {
+  if (accelerator === 'off') {
+    if (micShortcut) globalShortcut.unregister(micShortcut);
+    micShortcut = null;
+    micShortcutOk = true;
+    settings.update({ mic: { shortcut: 'off' } });
+    return { ok: true };
+  }
+  if (!isShortcut(accelerator)) return { ok: false, reason: 'invalid' };
+  const before = micShortcut;
+  if (before) globalShortcut.unregister(before);
+  let ok = false;
+  try { ok = globalShortcut.register(accelerator, () => helper && helper.send('mictoggle', 'key')); } catch { ok = false; }
+  if (!ok) {
+    if (before) {
+      try { globalShortcut.register(before, () => helper && helper.send('mictoggle', 'key')); } catch { /* ignore */ }
+    }
+    return { ok: false, reason: 'taken' };
+  }
+  micShortcut = accelerator;
+  micShortcutOk = true;
+  settings.update({ mic: { shortcut: accelerator } });
+  activity(`mic shortcut set to ${accelerator}`);
+  return { ok: true };
+}
+
+function sendMic(source = '') {
+  send('mic', { ...(state.mic || { ok: false, muted: false, device: '' }), source, shortcutOk: micShortcutOk });
+}
+
+function toggleMic(source) {
+  if (helper) helper.send('mictoggle', source);
+}
+
+// ------------------------------------------------------------------ play time
+
+let playtime = null;
+
+let demoPlaytime = false; // screenshots: sample play time instead of this PC's
+
+async function sendPlaytime() {
+  if (!playtime || demoPlaytime) return;
+  const sum = playtime.summary();
+  await Promise.all(sum.games.map(async (g) => { g.icon = await appIcon(g.path); }));
+  send('playtime', sum);
+}
+
+// ------------------------------------------------------------ bluetooth devices
+
+// Paired Bluetooth devices from the helper. When one connects the island says so (with its
+// battery), and it warns once at 20% and again at 10%.
+state.devices = [];
+let devicesSeen = false;
+const batteryWarned = new Map(); // device id -> lowest warning shown (20 or 10)
+
+function deviceKind(d) {
+  const n = (d.name || '').toLowerCase();
+  if (d.major === 4 || /airpods|buds|headphone|headset|earbud|wh-|wf-|beats|jabra/.test(n)) return 'headphones';
+  if ((d.major === 5 && d.minor != null && (d.minor & 0x0f) >= 1 && (d.minor & 0x0f) <= 2) || /controller|gamepad|dualsense|dualshock|xbox/.test(n)) return 'controller';
+  if ((d.major === 5 && d.minor != null && (d.minor & 0x30) === 0x20) || /mouse/.test(n)) return 'mouse';
+  if ((d.major === 5 && d.minor != null && (d.minor & 0x30) === 0x10) || /keyboard/.test(n)) return 'keyboard';
+  if (d.major === 2 || /phone/.test(n)) return 'phone';
+  return 'other';
+}
+
+const DEVICE_ICONS = { headphones: 'headphones', controller: 'gamepad', mouse: 'mouse', keyboard: 'keyboard', phone: 'smartphone', other: 'bluetooth' };
+
+function onDevices(list) {
+  const before = new Map(state.devices.map((d) => [d.id, d]));
+  state.devices = list.map((d) => ({ ...d, name: (d.name || 'Bluetooth device').replace(/[\u2018\u2019]/g, "'"), kind: deviceKind(d) }));
+  send('devices', state.devices);
+  const s = settings.get().devices;
+  for (const d of state.devices) {
+    const was = before.get(d.id);
+    // just connected (not on Hilal's first look, when everything "appears" at once)
+    if (devicesSeen && d.connected && !(was && was.connected)) {
+      activity(`bluetooth: ${d.name} connected${d.battery != null ? ` (${d.battery}%)` : ''}`);
+      if (s.connectPopup) {
+        send('toast', { icon: DEVICE_ICONS[d.kind], tone: 'blue', title: `${d.name} connected`, text: d.battery != null ? `Battery ${d.battery}%${d.charging ? ', charging' : ''}` : '', duration: 5, tab: 'system' });
+      }
+    }
+    if (devicesSeen && !d.connected && was && was.connected) activity(`bluetooth: ${d.name} disconnected`);
+    // low battery, once at 20% and once at 10% (again only after it's been charged)
+    if (!d.connected || d.charging || d.battery == null || d.battery > 25) {
+      batteryWarned.delete(d.id);
+    } else if (s.lowBattery) {
+      const level = d.battery <= 10 ? 10 : d.battery <= 20 ? 20 : 0;
+      const shown = batteryWarned.get(d.id) || 100;
+      if (level && level < shown) {
+        batteryWarned.set(d.id, level);
+        activity(`bluetooth: ${d.name} battery low (${d.battery}%)`);
+        send('toast', { icon: DEVICE_ICONS[d.kind], tone: 'bad', title: `${d.name}: battery low`, text: `${d.battery}% left`, duration: 10, tab: 'system' });
+      }
+    }
+  }
+  devicesSeen = true;
+}
+
+// ------------------------------------------------------------- system monitor
+
+// CPU and memory are read here; GPU, network and drives come from the helper. It all runs only
+// while the System tab is open or the readout on the island is on, and the island is on screen.
+let systemTab = false;
+let sysTimer = null;
+let cpuBefore = null;
+const sysHelper = { gpu: null, net: null, disks: [] };
+
+function cpuTimes() {
+  let idle = 0;
+  let total = 0;
+  for (const c of os.cpus()) {
+    const t = c.times;
+    idle += t.idle;
+    total += t.user + t.nice + t.sys + t.idle + t.irq;
+  }
+  return { idle, total };
+}
+
+function sysmonTick() {
+  if (demoSystem) {
+    send('system', demoSystem());
+    return;
+  }
+  const now = cpuTimes();
+  const cpus = os.cpus();
+  let usage = null;
+  if (cpuBefore && now.total > cpuBefore.total) usage = Math.round(100 * (1 - (now.idle - cpuBefore.idle) / (now.total - cpuBefore.total)));
+  cpuBefore = now;
+  send('system', {
+    cpu: { usage, model: cpus[0] ? cpus[0].model.trim() : '', threads: cpus.length },
+    mem: { total: os.totalmem(), free: os.freemem() },
+    gpu: sysHelper.gpu,
+    net: sysHelper.net,
+    disks: sysHelper.disks,
+    uptime: os.uptime(),
+  });
+}
+
+function syncSysmon() {
+  if (!helper || !settings) return;
+  const want = islandShown && (systemTab || settings.get().system.islandReadout);
+  if (want === !!sysTimer) return;
+  if (want) {
+    cpuBefore = null;
+    helper.send('sysmon', '1');
+    sysmonTick();
+    sysTimer = setInterval(sysmonTick, 1000);
+  } else {
+    clearInterval(sysTimer);
+    sysTimer = null;
+    helper.send('sysmon', '0');
+  }
+}
+
 async function appIcon(file) {
   if (!file) return '';
   if (!fileIcons.has(file)) {
@@ -280,6 +554,11 @@ function setPointerOver(over, cursor) {
 function watchPointer() {
   clearTimeout(pointerTimer);
   let delay = 250;
+  if (islandDragging) {
+    // The page has the mouse while you drag; don't make the window click-through under it.
+    pointerTimer = setTimeout(watchPointer, 40);
+    return;
+  }
   if (win && !win.isDestroyed() && islandShown && (!DEMO || fakeCursor)) {
     const b = win.getBounds();
     const c = fakeCursor ? { x: b.x + fakeCursor.x, y: b.y + fakeCursor.y } : screen.getCursorScreenPoint();
@@ -396,6 +675,13 @@ function rebuildTrayMenu() {
       },
     },
     { type: 'separator' },
+    {
+      label: 'Microphone muted',
+      type: 'checkbox',
+      checked: !!(state.mic && state.mic.muted),
+      enabled: !!(state.mic && state.mic.ok),
+      click: () => toggleMic('tray'),
+    },
     { label: 'Show a verse or dhikr now', click: () => { showIsland(); reminders.showNow(); } },
     { label: 'Pause reminders for 1 hour', click: () => reminders.snooze(3600e3) },
     { type: 'separator' },
@@ -473,9 +759,40 @@ function registerIpc() {
     downloads: downloads.list(),
     fullscreen: state.fullscreen,
     sound: state.sound,
+    fps: { ...fpsState, requested: settings.get().system.fpsRequested, inGames: settings.get().system.fpsInGames },
+    devices: state.devices,
+    mic: { ...(state.mic || { ok: false, muted: false, device: '' }), shortcutOk: micShortcutOk },
   }));
 
   ipcMain.on('activity', (_e, m) => activity(`page: ${String(m).slice(0, 200)}`));
+
+  // Dragging the island up or down: the page sends where it should be, and once more when you let go.
+  ipcMain.on('island:move', (_e, m) => {
+    const offset = Number(m && m.offset);
+    if (!Number.isFinite(offset) || !win || win.isDestroyed()) return;
+    dragOffset = offset;
+    islandDragging = !(m && m.done);
+    if (islandShown) win.setBounds(islandBounds());
+    if (m && m.done) {
+      const final = islandOffset();
+      dragOffset = null;
+      settings.update({ general: { islandOffset: final } });
+      activity(`island moved to ${final}px from the top`);
+      syncWheelZone();
+    }
+  });
+
+  ipcMain.on('system:watch', (_e, on) => {
+    systemTab = !!on;
+    syncSysmon();
+    if (systemTab && fpsState.available !== true && helper) helper.send('fpsprobe'); // maybe allowed since
+    if (systemTab) sendPlaytime();
+    syncFpsWatch();
+  });
+  ipcMain.handle('fps:allow', () => allowFps());
+  ipcMain.on('mic:toggle', () => toggleMic('island'));
+  ipcMain.on('mic:recording', (_e, on) => pauseMicShortcut(!!on));
+  ipcMain.handle('mic:setShortcut', (_e, accelerator) => setMicShortcut(String(accelerator || '')));
 
   ipcMain.on('island:rects', (_e, rects) => {
     if (rects && typeof rects === 'object') islandRects = { island: rects.island || null, bubble: rects.bubble || null };
@@ -618,6 +935,11 @@ async function start() {
   activity(`Hilal ${app.getVersion()} started${DEMO ? ' (demo)' : ''}`);
   migrateFromOldName();
   settings = new Settings(app);
+  playtime = new PlayTime(app.getPath('userData'));
+  playtime.on('change', (e) => {
+    if (e.started) activity(`play time: ${e.started} started`);
+    if (systemTab) sendPlaytime();
+  });
   helper = new Helper({
     exe: app.isPackaged
       ? path.join(process.resourcesPath, 'native', 'HilalHelper.exe')
@@ -652,6 +974,7 @@ async function start() {
   createTray();
   watchPointer();
   trace('window + tray created');
+  syncMicShortcut();
   watchClipboard();
   downloads.watchBrowser(settings.get().downloads.watchBrowser, app.getPath('downloads'));
   if (!DEMO) {
@@ -671,6 +994,8 @@ async function start() {
     send('thumb', msg);
   });
   helper.on('fullscreen', (msg) => {
+    state.fullscreenApp = msg.value ? msg.app || null : null;
+    if (playtime) playtime.onFullscreen(state.fullscreenApp);
     state.fullscreen = !!msg.value;
     if (!state.fullscreen) state.forceShow = false; // the next fullscreen app hides it again
     activity(`fullscreen ${state.fullscreen ? 'on' : 'off'}: ${msg.window || '?'} (Windows state ${msg.state})`);
@@ -685,6 +1010,10 @@ async function start() {
     wheelZone = null;
     syncWheelZone();
     if (soundWatching) helper.send('mixerwatch', '1');
+    if (sysTimer) helper.send('sysmon', '1');
+    helper.send('micget');
+    fpsOn = false;
+    helper.send('fpsprobe'); // can we count frames? (answers with an 'fps' message)
   });
   helper.on('volume', (msg) => {
     if (demoSound) return;
@@ -699,6 +1028,40 @@ async function start() {
     send('sound:mixer', { device: msg.device, apps });
   });
   helper.on('peaks', (msg) => { if (!demoSound) send('sound:peaks', msg); });
+  helper.on('devices', (msg) => onDevices(msg.list || []));
+  helper.on('mic', (msg) => {
+    const was = state.mic ? state.mic.muted : null;
+    state.mic = { ok: msg.ok, muted: msg.muted, device: msg.device };
+    if (was !== null && was !== msg.muted) activity(`microphone ${msg.muted ? 'muted' : 'on'} (${msg.source})`);
+    sendMic(msg.source);
+    if (was !== msg.muted) {
+      updateVisibility(); // the red mic over a game
+      rebuildTrayMenu();
+    }
+  });
+  helper.on('fps', (msg) => {
+    const was = fpsState.available;
+    if (msg.available === false) {
+      fpsState.available = false;
+      fpsState.reason = msg.reason || '';
+      fpsOn = false;
+    } else {
+      fpsState.available = true;
+      fpsState.reason = '';
+      if ('fps' in msg) Object.assign(fpsState, { app: msg.app || '', title: msg.title || '', fps: msg.fps });
+    }
+    if (was !== fpsState.available) {
+      activity(`FPS ${fpsState.available ? 'available' : `not available (${fpsState.reason})`}`);
+      updateVisibility();
+      syncFpsWatch();
+    }
+    sendFps();
+  });
+  helper.on('sysmon', (msg) => {
+    sysHelper.gpu = msg.gpu || null;
+    sysHelper.net = msg.net || null;
+    if (msg.disks) sysHelper.disks = msg.disks;
+  });
   helper.on('brightness', (msg) => {
     state.sound.brightness = { supported: msg.supported, level: msg.level, method: msg.method };
     send('brightness', { ...state.sound.brightness, source: msg.source });
@@ -723,14 +1086,42 @@ async function start() {
     }
     if (patch.general && 'launchAtStartup' in patch.general && !process.env.DI_USER_DATA) applyLoginItem(s.general.launchAtStartup);
     if (patch.general && 'hideInFullscreen' in patch.general) updateVisibility();
+    if (patch.general && 'islandOffset' in patch.general && !islandDragging) {
+      dragOffset = null;
+      reposition();
+    }
     if (patch.general && 'volumeHud' in patch.general) syncVolumeKeys();
     if (patch.general && 'scrollVolume' in patch.general) syncWheelZone();
+    if (patch.mic) {
+      syncMicShortcut();
+      if ('overlay' in patch.mic) updateVisibility();
+    }
+    if (patch.system) {
+      syncSysmon();
+      if ('fpsInGames' in patch.system) {
+        updateVisibility();
+        if (gameOverlay) {
+          reposition();
+          send('game', { on: true, corner: overlayCorner() });
+        }
+      }
+      sendFps();
+    }
     if (patch.azkar) reminders.resetTimer();
     rebuildTrayMenu();
   });
 
-  powerMonitor.on('resume', () => prayer.onResume());
-  powerMonitor.on('unlock-screen', () => prayer.refresh());
+  powerMonitor.on('resume', () => {
+    prayer.onResume();
+    if (playtime && state.fullscreen) playtime.onFullscreen(state.fullscreenApp);
+  });
+  powerMonitor.on('unlock-screen', () => {
+    prayer.refresh();
+    if (playtime && state.fullscreen) playtime.onFullscreen(state.fullscreenApp);
+  });
+  // asleep or locked isn't play time
+  powerMonitor.on('suspend', () => playtime && playtime.stop());
+  powerMonitor.on('lock-screen', () => playtime && playtime.stop());
   screen.on('display-metrics-changed', () => {
     reposition();
     activity(`screen changed: ${rect(screen.getPrimaryDisplay().bounds)} at ${screen.getPrimaryDisplay().scaleFactor}x`);
@@ -741,6 +1132,8 @@ async function start() {
 
 app.on('before-quit', () => {
   quitting = true;
+  try { globalShortcut.unregisterAll(); } catch { /* ignore */ }
+  if (playtime) playtime.stop();
   try { endAzan('quit'); } catch { /* ignore */ }
   if (downloads) downloads.shutdown();
   if (helper) helper.stop();
@@ -796,6 +1189,72 @@ async function runDemo() {
       await wait(400);
       await win.webContents.executeJavaScript('clearTimeout(ui.hudTimer)'); // keep it up for the screenshot
     }
+    if (kind === 'mic') {
+      // sample microphone state for screenshots (muted / on)
+      state.mic = { ok: true, muted: arg === 'muted', device: 'Microphone (USB Audio)' };
+      sendMic('key');
+    }
+    if (kind === 'playtimedemo') {
+      demoPlaytime = true;
+      // sample play time for screenshots
+      const day = (back) => { const d = new Date(); d.setDate(d.getDate() - back); return d.toISOString().slice(0, 10); };
+      const week = [5400, 2700, 0, 7200, 3600, 1800, 5100].map((secs, i) => ({ day: day(6 - i), secs }));
+      const exe = (p) => (fs.existsSync(p) ? p : '');
+      const games = [
+        { key: 'fortnite', name: 'Fortnite', today: 3900, week: 18300, playing: true, path: '' },
+        { key: 'cs2', name: 'Counter-Strike 2', today: 1200, week: 6600, playing: false, path: '' },
+        { key: 'roblox', name: 'Roblox', today: 0, week: 900, playing: false, path: '' },
+      ];
+      Promise.all(games.map(async (g) => { g.icon = await appIcon(exe(g.path)); })).then(() => send('playtime', { week, games, today: 5100, playing: 'fortnite' }));
+    }
+    if (kind === 'devices') {
+      // sample Bluetooth events for screenshots and tests
+      const pods = (connected, battery, charging = false) => ({ id: 'demo-pods', name: 'AirPods Pro', connected, battery, charging, major: 4, minor: 6 });
+      const pad = (connected, battery) => ({ id: 'demo-pad', name: 'DualSense Wireless Controller', connected, battery, charging: false, major: 5, minor: 2 });
+      const mouse = { id: 'demo-mouse', name: 'MX Master 3S', connected: true, battery: 64, charging: false, major: 5, minor: 32 };
+      if (arg === 'start') onDevices([pods(false, null), pad(true, 55), mouse]);
+      if (arg === 'connect') onDevices([pods(true, 80), pad(true, 55), mouse]);
+      if (arg === 'low') onDevices([pods(true, 18), pad(true, 55), mouse]);
+    }
+    if (kind === 'fpsdemo') {
+      // sample FPS for screenshots: "Fortnite" at around 150 FPS
+      Object.assign(fpsState, { available: true, reason: '', app: 'FortniteClient-Win64-Shipping', title: 'Fortnite', fps: 150 });
+      sendFps();
+      setInterval(() => { fpsState.fps = 140 + Math.round(Math.random() * 25); sendFps(); }, 1000);
+    }
+    if (kind === 'gamepill') {
+      // what a fullscreen game would show (demo mode never hides the island by itself)
+      if (arg) settings.update({ system: { fpsInGames: arg } }); // first: this re-runs the normal visibility logic
+      islandShown = false;
+      gameOverlay = true;
+      win.setIgnoreMouseEvents(true);
+      reposition();
+      send('window:visible', false);
+      send('game', { on: true, corner: arg || settings.get().system.fpsInGames });
+      log(`  game window wanted ${rect(overlayBounds())}, got ${rect(win.getBounds())}`);
+    }
+    if (kind === 'gameend') {
+      gameOverlay = false;
+      updateVisibility();
+    }
+    if (kind === 'demosys') {
+      // made-up but believable readings for the README screenshots
+      const t0 = Date.now();
+      const GB = 1024 ** 3;
+      demoSystem = (back = 0) => {
+        const t = (Date.now() - t0) / 1000 - back;
+        const w = (f, p) => 0.5 + 0.5 * Math.sin(t * f + p);
+        return {
+          cpu: { usage: Math.round(18 + 14 * w(0.31, 0)), model: 'Intel(R) Core(TM) i7-12700 CPU', threads: 20 },
+          mem: { total: 32 * GB, free: (13.4 - 0.4 * w(0.3, 1)) * GB },
+          gpu: { name: 'NVIDIA GeForce RTX 4070', util: Math.round(46 + 20 * w(0.23, 2)), temp: 61, memUsed: 5.2 * GB, memTotal: 12 * GB },
+          net: { rx: Math.round((2.6 + 1.6 * w(0.37, 3) * w(0.11, 1)) * 1024 * 1024), tx: Math.round((180 + 90 * w(0.29, 4)) * 1024) },
+          disks: [{ name: 'C:', label: 'Windows', total: 1024 * GB, free: 412 * GB }, { name: 'D:', label: 'Games', total: 2000 * GB, free: 186 * GB }],
+          uptime: 3 * 86400 + 5 * 3600 + 12 * 60,
+        };
+      };
+      for (let i = 59; i > 0; i--) send('system', demoSystem(i)); // a minute of history
+    }
     if (kind === 'demosound') {
       demoSound = true;
       const icon = async (exe) => (fs.existsSync(exe) ? appIcon(exe) : '');
@@ -821,6 +1280,7 @@ async function runDemo() {
       }, 100);
     }
     if (kind === 'dismiss') await win.webContents.executeJavaScript('dismissOverlay()');
+    if (kind === 'scrollsys') await win.webContents.executeJavaScript(`(document.querySelector('.sys') || {}).scrollTop = ${Number(arg) || 9999}`);
     if (kind === 'scroll') await win.webContents.executeJavaScript(`document.querySelector('.settings').scrollTop = ${Number(arg) || 0}`);
     if (kind === 'fakedl') send('downloads', fakeDownloads());
     // click-through tests: a simulated cursor (your real mouse is never moved) and hide/show cycles

@@ -40,7 +40,10 @@ $steps = @(
   @('collapse', $null),
   @('hud:volume', 'hud-volume'),
   @('dismiss', $null),
-  @('hud:brightness', 'hud-brightness')
+  @('hud:brightness', 'hud-brightness'),
+  @('dismiss', $null),
+  @('demosys', $null),
+  @('expand:system', 'system')
 )
 
 Write-Host 'Running Hilal in demo mode...'
@@ -121,7 +124,7 @@ for ($i = 0; $i -lt $steps.Count; $i++) {
 }
 
 Write-Host 'Framing screenshots...'
-foreach ($name in 'music', 'downloads', 'prayer', 'azkar', 'settings', 'ayah', 'dua', 'azan', 'prealert', 'clipboard', 'sound') {
+foreach ($name in 'music', 'downloads', 'prayer', 'azkar', 'settings', 'ayah', 'dua', 'azan', 'prealert', 'clipboard', 'sound', 'system') {
   Save-Framed @($crops[$name]) $name
 }
 Save-Framed @($crops['compact-idle'], $crops['compact-music'], $crops['compact-download']) 'compact' 56 6

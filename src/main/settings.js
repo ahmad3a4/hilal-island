@@ -44,10 +44,26 @@ function createDefaults(app) {
       watchBrowser: true,
       clipboard: true,
     },
+    mic: {
+      shortcut: 'Control+Alt+K', // mutes the microphone in every app ('off' for none)
+      sound: true, // a short tone when it changes
+      overlay: true, // a red mic over fullscreen games while muted
+    },
+    devices: {
+      connectPopup: true, // "AirPods connected · 80%" on the island
+      lowBattery: true, // a warning at 20% and 10%
+    },
+    system: {
+      islandReadout: false, // CPU use and GPU temperature on the closed island
+      fpsInGames: 'top-left', // where the FPS counter goes over fullscreen games ('off' to hide)
+      fpsRequested: false, // you allowed FPS once (Windows needs a sign-out before it takes effect)
+    },
     general: {
       launchAtStartup: false,
       hideInFullscreen: true,
       timeFormat: '12h',
+      islandOffset: 0, // how far below the top of the screen the island sits (drag it to change)
+      lockPosition: false, // when on, dragging doesn't move the island
       volumeHud: true, // the island shows volume changes instead of the Windows pop-up
       scrollVolume: true, // scroll on the island to change the volume (Shift for brightness)
     },
@@ -62,6 +78,23 @@ function merge(target, patch) {
     out[k] = isObject(v) && isObject(target[k]) ? merge(target[k], v) : v;
   }
   return out;
+}
+
+// A keyboard shortcut in Electron's format ("Control+Alt+K"). Letters, digits and other typing keys
+// need two of Ctrl, Alt, Shift and Win, so they never take over shortcuts like Ctrl+C in other apps;
+// F-keys, numpad keys, Insert, Scroll Lock and Print Screen can be used alone (but not Alt+F4).
+const SHORTCUT_KEY = /^([A-Z0-9]|F([1-9]|1\d|2[0-4])|Space|Tab|Backspace|Delete|Insert|Return|Up|Down|Left|Right|Home|End|PageUp|PageDown|Scrolllock|PrintScreen|Plus|num[0-9]|numadd|numsub|nummult|numdiv|numdec|[`\-=[\]\\;',./])$/;
+const SOLO_KEY = /^(F([1-9]|1\d|2[0-4])|Insert|Scrolllock|PrintScreen|num.+)$/;
+const MODIFIERS = new Set(['Control', 'Alt', 'Shift', 'Super']);
+
+function isShortcut(s) {
+  if (typeof s !== 'string' || !s || s.length > 60) return false;
+  const parts = s.split('+');
+  const key = parts.pop();
+  if (!SHORTCUT_KEY.test(key)) return false;
+  if (new Set(parts).size !== parts.length || !parts.every((p) => MODIFIERS.has(p))) return false;
+  if (SOLO_KEY.test(key)) return !(key === 'F4' && parts.length === 1 && parts[0] === 'Alt');
+  return parts.length >= 2;
 }
 
 const clamp = (v, lo, hi, fallback) => {
@@ -84,6 +117,16 @@ function sanitize(s, d) {
   s.downloads.maxActive = Math.round(clamp(s.downloads.maxActive, 1, 6, d.downloads.maxActive));
   if (typeof s.downloads.folder !== 'string' || !s.downloads.folder) s.downloads.folder = d.downloads.folder;
   if (!['12h', '24h'].includes(s.general.timeFormat)) s.general.timeFormat = '12h';
+  s.general.islandOffset = Math.round(clamp(s.general.islandOffset, 0, 4000, 0));
+  s.general.lockPosition = s.general.lockPosition === true;
+  s.system.islandReadout = s.system.islandReadout === true;
+  if (!['off', 'top-left', 'top', 'top-right'].includes(s.system.fpsInGames)) s.system.fpsInGames = 'top-left';
+  s.system.fpsRequested = s.system.fpsRequested === true;
+  s.devices.connectPopup = s.devices.connectPopup !== false;
+  if (s.mic.shortcut !== 'off' && !isShortcut(s.mic.shortcut)) s.mic.shortcut = 'Control+Alt+K';
+  s.mic.sound = s.mic.sound !== false;
+  s.mic.overlay = s.mic.overlay !== false;
+  s.devices.lowBattery = s.devices.lowBattery !== false;
   return s;
 }
 
@@ -131,4 +174,4 @@ class Settings extends EventEmitter {
   }
 }
 
-module.exports = { Settings };
+module.exports = { Settings, isShortcut };
