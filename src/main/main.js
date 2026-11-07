@@ -13,6 +13,7 @@ const { PrayerScheduler, Reminders } = require('./scheduler');
 const { METHODS, NAMES_AR, NAMES_EN } = require('./prayer');
 const { CITIES, nearestCity } = require('./cities');
 const { PlayTime } = require('./playtime');
+const updater = require('./updater');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const ASSETS = path.join(ROOT, 'assets');
@@ -189,7 +190,7 @@ function createWindow() {
 
 function reposition() {
   if (!win || win.isDestroyed()) return;
-  win.setBounds(islandShown ? islandBounds() : gameOverlay ? overlayBounds() : parkedBounds());
+  win.setBounds(islandShown ? islandBounds() : parkedBounds());
 }
 
 // ------------------------------------------------------------------- fps
@@ -204,7 +205,7 @@ const fpsState = { available: null, reason: '', app: '', title: '', fps: null };
 
 function overlayCorner() {
   const corner = settings.get().system.fpsInGames;
-  return corner === 'off' ? 'top-left' : corner; // the mic alone goes top left
+  return corner === 'off' || corner === 'island' ? 'top-left' : corner; // the mic alone goes top left
 }
 
 function overlayBounds() {
@@ -217,21 +218,96 @@ function overlayBounds() {
 
 function gameOverlayWanted() {
   const s = settings.get();
-  const fps = fpsState.available === true && s.system.fpsInGames !== 'off';
-  const mic = !!(state.mic && state.mic.muted && s.mic.overlay);
-  return !DEMO && (fps || mic) && state.fullscreen && !state.hiddenByUser && !state.azan && s.general.hideInFullscreen;
+  if (!state.fullscreen || state.hiddenByUser || state.azan) return false;
+  // FPS in a corner: over every fullscreen game, whether the island stays or not
+  if (fpsState.available === true && !['off', 'island'].includes(s.system.fpsInGames)) return true;
+  // only a muted mic: when the island (which shows it too) is out of the way
+  return !!(state.mic && state.mic.muted && s.mic.overlay && !islandShown);
+}
+
+// The counter lives in its own small click-through window in the chosen corner.
+let pillWin = null;
+
+function pillWindow() {
+  if (pillWin && !pillWin.isDestroyed()) return pillWin;
+  pillWin = new BrowserWindow({
+    ...overlayBounds(),
+    transparent: true,
+    backgroundColor: '#00000000',
+    frame: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    focusable: false,
+    show: false,
+    type: 'toolbar',
+    title: 'Hilal FPS',
+    webPreferences: {
+      preload: path.join(__dirname, '..', 'preload', 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      backgroundThrottling: false,
+      spellcheck: false,
+    },
+  });
+  pillWin.setIgnoreMouseEvents(true);
+  pillWin.setAlwaysOnTop(true, 'screen-saver');
+  pillWin.loadFile(path.join(ROOT, 'src', 'renderer', 'pill.html'));
+  pillWin.webContents.on('did-finish-load', () => sendPill());
+  return pillWin;
+}
+
+function sendPill() {
+  if (!pillWin || pillWin.isDestroyed()) return;
+  const s = settings.get();
+  const fps = !['off', 'island'].includes(s.system.fpsInGames) && fpsState.available === true ? fpsState.fps : null;
+  const micOff = !!(state.mic && state.mic.muted && s.mic.overlay);
+  pillWin.webContents.send('pill', { fps, micOff, corner: overlayCorner() });
+}
+
+function syncPill() {
+  if (!settings) return;
+  const want = gameOverlayWanted();
+  if (want && gameOverlay) {
+    pillWin.setBounds(overlayBounds());
+    sendPill();
+    return;
+  }
+  if (want === gameOverlay) return;
+  gameOverlay = want;
+  if (want) {
+    const w = pillWindow();
+    w.setBounds(overlayBounds());
+    w.showInactive();
+    w.setAlwaysOnTop(true, 'screen-saver');
+    sendPill();
+    activity(`FPS counter shown (${overlayCorner()})`);
+  } else if (pillWin && !pillWin.isDestroyed()) {
+    pillWin.hide();
+  }
+  syncFpsWatch();
 }
 
 // Frames are counted only while the System tab is open or the counter is over a game.
+// Frames are counted while the System tab is open, while the counter is over a game, or while
+// the island itself stays over a fullscreen game ("Hide in fullscreen apps" off: FPS shows in it).
 function syncFpsWatch() {
   if (!helper) return;
-  const want = fpsState.available === true && (systemTab || gameOverlay);
+  const inIsland = islandShown && state.fullscreen && settings.get().system.fpsInGames === 'island';
+  const want = fpsState.available === true && (systemTab || gameOverlay || inIsland);
   if (want === fpsOn) return;
   fpsOn = want;
   helper.send('fps', want ? '1' : '0');
 }
 
 function sendFps() {
+  sendPill();
   send('fps', { ...fpsState, requested: settings.get().system.fpsRequested, inGames: settings.get().system.fpsInGames });
 }
 
@@ -276,11 +352,12 @@ function shouldHide() {
 function updateVisibility() {
   if (!win || win.isDestroyed()) return;
   const show = !shouldHide();
-  const overlay = !show && gameOverlayWanted();
   const first = !win.isVisible();
-  if (show === islandShown && overlay === gameOverlay && !first) return;
+  if (show === islandShown && !first) {
+    syncPill();
+    return;
+  }
   islandShown = show;
-  gameOverlay = overlay;
   setPointerOver(false);
   win.setIgnoreMouseEvents(true);
   pointerOver = false;
@@ -288,9 +365,9 @@ function updateVisibility() {
   if (first) win.showInactive();
   win.setAlwaysOnTop(true, 'screen-saver');
   if (show) activity(`island shown at ${rect(win.getBounds())}${state.forceShow ? ' (over a fullscreen app, from the tray)' : ''}`);
-  else activity(`island hidden (${state.hiddenByUser ? 'from the tray' : 'fullscreen app'})${overlay ? ', FPS counter shown' : ''}`);
-  send('game', { on: overlay, corner: overlayCorner() }); // before 'visible': the page measures the island then
+  else activity(`island hidden (${state.hiddenByUser ? 'from the tray' : 'fullscreen app'})`);
   send('window:visible', show);
+  syncPill();
   rebuildTrayMenu();
   syncVolumeKeys();
   syncSysmon();
@@ -400,6 +477,53 @@ function sendMic(source = '') {
 
 function toggleMic(source) {
   if (helper) helper.send('mictoggle', source);
+}
+
+// ------------------------------------------------------------------- updates
+
+// Settings > General > Updates, and a daily look (if allowed) that offers the new version.
+let updateInfo = null;
+let updating = false;
+
+async function checkForUpdate(quietly) {
+  try {
+    updateInfo = await updater.check(app.getVersion());
+    if (!quietly) activity(`update check: ${updateInfo.available ? `${updateInfo.latest} available` : 'up to date'}`);
+    if (quietly && updateInfo.available) {
+      activity(`update check: ${updateInfo.latest} available`);
+      send('update:available', updateInfo);
+    }
+    return updateInfo;
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+async function installUpdate() {
+  if (updating) return { error: 'Already downloading' };
+  if (!updateInfo || !updateInfo.available) await checkForUpdate(false);
+  if (!updateInfo || !updateInfo.available) return { error: 'No new version' };
+  updating = true;
+  try {
+    activity(`update: downloading ${updateInfo.latest}`);
+    const file = await updater.download(updateInfo, (p) => send('update:progress', p));
+    activity(`update: starting the installer for ${updateInfo.latest}`);
+    updater.launch(file);
+    setTimeout(() => app.quit(), 800); // the installer replaces Hilal and starts it again
+    return { ok: true };
+  } catch (err) {
+    activity(`update failed: ${err.message}`);
+    return { error: err.message };
+  } finally {
+    updating = false;
+  }
+}
+
+function scheduleUpdateChecks() {
+  if (DEMO || process.env.DI_USER_DATA) return; // test runs never look
+  const run = () => { if (settings.get().general.checkUpdates) checkForUpdate(true); };
+  setTimeout(run, 60e3);
+  setInterval(run, 24 * 3600e3);
 }
 
 // ------------------------------------------------------------------ play time
@@ -790,6 +914,8 @@ function registerIpc() {
     syncFpsWatch();
   });
   ipcMain.handle('fps:allow', () => allowFps());
+  ipcMain.handle('update:check', () => checkForUpdate(false));
+  ipcMain.handle('update:install', () => installUpdate());
   ipcMain.on('mic:toggle', () => toggleMic('island'));
   ipcMain.on('mic:recording', (_e, on) => pauseMicShortcut(!!on));
   ipcMain.handle('mic:setShortcut', (_e, accelerator) => setMicShortcut(String(accelerator || '')));
@@ -975,6 +1101,7 @@ async function start() {
   watchPointer();
   trace('window + tray created');
   syncMicShortcut();
+  scheduleUpdateChecks();
   watchClipboard();
   downloads.watchBrowser(settings.get().downloads.watchBrowser, app.getPath('downloads'));
   if (!DEMO) {
@@ -1001,6 +1128,7 @@ async function start() {
     activity(`fullscreen ${state.fullscreen ? 'on' : 'off'}: ${msg.window || '?'} (Windows state ${msg.state})`);
     updateVisibility();
     send('fullscreen', state.fullscreen);
+    syncFpsWatch(); // also when the island stays on screen over the game
   });
   helper.on('ready', () => {
     // (Re)started: it knows nothing yet.
@@ -1036,6 +1164,7 @@ async function start() {
     sendMic(msg.source);
     if (was !== msg.muted) {
       updateVisibility(); // the red mic over a game
+      syncPill();
       rebuildTrayMenu();
     }
   });
@@ -1085,7 +1214,10 @@ async function start() {
       downloads.schedule();
     }
     if (patch.general && 'launchAtStartup' in patch.general && !process.env.DI_USER_DATA) applyLoginItem(s.general.launchAtStartup);
-    if (patch.general && 'hideInFullscreen' in patch.general) updateVisibility();
+    if (patch.general && 'hideInFullscreen' in patch.general) {
+      updateVisibility();
+      syncFpsWatch();
+    }
     if (patch.general && 'islandOffset' in patch.general && !islandDragging) {
       dragOffset = null;
       reposition();
@@ -1100,10 +1232,8 @@ async function start() {
       syncSysmon();
       if ('fpsInGames' in patch.system) {
         updateVisibility();
-        if (gameOverlay) {
-          reposition();
-          send('game', { on: true, corner: overlayCorner() });
-        }
+        syncFpsWatch();
+        syncPill();
       }
       sendFps();
     }
@@ -1216,6 +1346,7 @@ async function runDemo() {
       if (arg === 'connect') onDevices([pods(true, 80), pad(true, 55), mouse]);
       if (arg === 'low') onDevices([pods(true, 18), pad(true, 55), mouse]);
     }
+    if (kind === 'fsflag') { state.fullscreen = arg !== 'off'; send('fullscreen', state.fullscreen); } // screenshots: pretend a fullscreen game
     if (kind === 'fpsdemo') {
       // sample FPS for screenshots: "Fortnite" at around 150 FPS
       Object.assign(fpsState, { available: true, reason: '', app: 'FortniteClient-Win64-Shipping', title: 'Fortnite', fps: 150 });
@@ -1223,19 +1354,14 @@ async function runDemo() {
       setInterval(() => { fpsState.fps = 140 + Math.round(Math.random() * 25); sendFps(); }, 1000);
     }
     if (kind === 'gamepill') {
-      // what a fullscreen game would show (demo mode never hides the island by itself)
-      if (arg) settings.update({ system: { fpsInGames: arg } }); // first: this re-runs the normal visibility logic
-      islandShown = false;
-      gameOverlay = true;
-      win.setIgnoreMouseEvents(true);
-      reposition();
-      send('window:visible', false);
-      send('game', { on: true, corner: arg || settings.get().system.fpsInGames });
-      log(`  game window wanted ${rect(overlayBounds())}, got ${rect(win.getBounds())}`);
+      // what a fullscreen game would show
+      if (arg) settings.update({ system: { fpsInGames: arg } });
+      state.fullscreen = true;
+      syncPill();
     }
     if (kind === 'gameend') {
-      gameOverlay = false;
-      updateVisibility();
+      state.fullscreen = false;
+      syncPill();
     }
     if (kind === 'demosys') {
       // made-up but believable readings for the README screenshots

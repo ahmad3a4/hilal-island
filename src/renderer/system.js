@@ -266,11 +266,19 @@ function updateFps() {
   const f = S.fps || {};
   // the counter over a game
   const pill = document.getElementById('fps-pill');
-  const n = f.available === true && f.fps > 0 && S.settings && S.settings.system.fpsInGames !== 'off' ? Math.round(f.fps) : null;
+  const where = S.settings ? S.settings.system.fpsInGames : 'off';
+  const n = f.available === true && f.fps > 0 && where !== 'off' ? Math.round(f.fps) : null;
   const micOff = !!(S.mic && S.mic.muted && S.settings && S.settings.mic.overlay !== false);
   document.getElementById('fps-num').textContent = n == null ? '' : String(n);
   document.getElementById('fps-mic').innerHTML = micOff ? ic('micOff') : '';
   pill.className = `fps-pill ${n == null && !micOff ? 'idle' : fpsClass(n)}${micOff ? ' mic-off' : ''}${n == null ? ' no-fps' : ''}`;
+  // or inside the island, when it stays on screen over a fullscreen game
+  const inIsland = n != null && where === 'island' && !!S.fullscreen && !document.body.classList.contains('game');
+  if (inIsland !== !!ui.compactFps) {
+    ui.compactFps = inIsland;
+    renderCompact();
+  }
+  fillIslandFps();
   // the System tab
   if (ui.mode !== 'expanded' || ui.tab !== 'system') return;
   const row = E.views.system.querySelector('[data-fps]');
@@ -407,3 +415,16 @@ api.on('playtime', (p) => {
   playtimeHtmlLast = '';
   renderPlaytime();
 });
+
+// The FPS number inside the island (only there while a fullscreen game is in front).
+function fillIslandFps() {
+  const el = E.compact.querySelector('[data-fps-island]');
+  if (!el) return;
+  const f = S.fps || {};
+  const n = f.fps > 0 ? Math.round(f.fps) : null;
+  el.textContent = n == null ? '--' : String(n);
+  el.parentElement.className = `c-fps ${fpsClass(n)}`;
+}
+
+// The game closed or went to the background: no FPS in the island any more.
+api.on('fullscreen', () => updateFps());

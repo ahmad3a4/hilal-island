@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self' file: 'unsafe-inline'; style-src 'self' file: 'unsafe-inline'" />
+  <title>Hilal FPS</title>
+  <!-- The FPS counter (and muted mic) shown in a corner over fullscreen games: its own small,
+       click-through window, so the island can stay where it is. -->
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif; user-select: none; }
+    .pill { position: fixed; top: 8px; left: 8px; height: 32px; padding: 0 12px 0 13px; display: flex; align-items: center; gap: 5px; border-radius: 16px; background: rgba(0, 0, 0, 0.78); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 4px 14px rgba(0, 0, 0, 0.4); color: #3ddc97; white-space: nowrap; transition: opacity 0.3s; }
+    body[data-corner="top-right"] .pill { left: auto; right: 8px; }
+    body[data-corner="top"] .pill { left: 50%; translate: -50% 0; }
+    b { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 28px; text-align: right; }
+    small { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; color: #a5a5ae; }
+    .mid { color: #f3c36b; }
+    .low { color: #ff6b6b; }
+    .mic { display: none; color: #ff6b6b; }
+    .mic svg { width: 16px; height: 16px; display: block; }
+    .pill.mic-off .mic { display: block; }
+    .pill.no-fps b, .pill.no-fps small { display: none; }
+    .pill.no-fps { padding: 0 9px; }
+    .pill.idle { opacity: 0; }
+  </style>
+</head>
+<body data-corner="top-left">
+  <div class="pill idle" id="pill">
+    <span class="mic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg></span>
+    <b id="num"></b><small>FPS</small>
+  </div>
+  <script>
+    window.island.on('pill', (p) => {
+      document.body.dataset.corner = p.corner || 'top-left';
+      const n = p.fps > 0 ? Math.round(p.fps) : null;
+      document.getElementById('num').textContent = n == null ? '' : String(n);
+      const color = n == null ? '' : n < 30 ? ' low' : n < 60 ? ' mid' : '';
+      document.getElementById('pill').className = 'pill' + (n == null && !p.micOff ? ' idle' : color) + (p.micOff ? ' mic-off' : '') + (n == null ? ' no-fps' : '');
+    });
+  </script>
+</body>
+</html>

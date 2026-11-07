@@ -4,7 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const CHANNELS = [
   'settings', 'prayer', 'media', 'thumb', 'downloads', 'download:done', 'download:failed', 'reminder', 'azan:start', 'azan:end',
   'prayer:pre-alert', 'clipboard:link', 'fullscreen', 'window:blur', 'ui:open', 'toast', 'pointer', 'window:visible',
-  'sound:volume', 'sound:mixer', 'sound:peaks', 'brightness', 'system', 'fps', 'game', 'devices', 'mic', 'playtime',
+  'sound:volume', 'sound:mixer', 'sound:peaks', 'brightness', 'system', 'fps', 'game', 'devices', 'mic', 'playtime', 'pill', 'update:available', 'update:progress',
 ];
 
 contextBridge.exposeInMainWorld('island', {
@@ -24,6 +24,8 @@ contextBridge.exposeInMainWorld('island', {
   sound: (cmd, value, pid) => ipcRenderer.send('sound', { cmd, value, pid }),
   systemWatch: (on) => ipcRenderer.send('system:watch', !!on),
   fpsAllow: () => ipcRenderer.invoke('fps:allow'),
+  updateCheck: () => ipcRenderer.invoke('update:check'),
+  updateInstall: () => ipcRenderer.invoke('update:install'),
   micToggle: () => ipcRenderer.send('mic:toggle'),
   micRecording: (on) => ipcRenderer.send('mic:recording', !!on),
   micSetShortcut: (accelerator) => ipcRenderer.invoke('mic:setShortcut', accelerator),

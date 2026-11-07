@@ -369,11 +369,14 @@ function renderCompact() {
   const readout = typeof sysReadoutHtml === 'function' ? sysReadoutHtml() : '';
   // a red mic in front while the microphone is muted
   const mic = S.mic && S.mic.muted ? `<span class="c-mic" title="Microphone muted">${ic('micOff')}</span>` : '';
-  if (readout || mic) html = `<div class="c-row">${mic}${html}${readout}</div>`;
+  // the game's FPS, when the island stays on screen over a fullscreen game (system.js fills it in)
+  const fps = ui.compactFps ? '<span class="c-fps"><b data-fps-island>--</b><small>FPS</small></span>' : '';
+  if (readout || mic || fps) html = `<div class="c-row">${mic}${html}${fps}${readout}</div>`;
   if (html !== ui.compactHtml) {
     ui.compactHtml = html;
     E.compact.innerHTML = html;
     if (typeof updateSysReadout === 'function') updateSysReadout();
+    if (typeof fillIslandFps === 'function') fillIslandFps();
     if (ui.mode === 'compact') setGeometry();
   }
   renderBubble(ui.mode === 'compact' ? acts[1] : null);
@@ -870,7 +873,7 @@ function section(title, iconName, rows, note = '') {
 
 function settingsStructureKey() {
   const s = S.settings;
-  return [s.location.cityId === 'custom', s.azan.voice === 'custom', s.azan.fajrVoice === 'custom', ui.showAdjust, s.azan.customFile, s.azan.fajrCustomFile, s.downloads.folder, ui.sheet && ui.sheet.id, !!s.general.islandOffset, s.general.lockPosition, S.fps && S.fps.available, S.fps && S.fps.requested, S.mic && S.mic.muted, S.mic && S.mic.ok, S.mic && S.mic.shortcutOk, s.mic.shortcut, ui.recShortcut, ui.recPreview, ui.recError].join('|');
+  return [s.location.cityId === 'custom', s.azan.voice === 'custom', s.azan.fajrVoice === 'custom', ui.showAdjust, s.azan.customFile, s.azan.fajrCustomFile, s.downloads.folder, ui.sheet && ui.sheet.id, !!s.general.islandOffset, s.general.lockPosition, s.general.hideInFullscreen, S.fps && S.fps.available, S.fps && S.fps.requested, ui.update && JSON.stringify(ui.update), S.mic && S.mic.muted, S.mic && S.mic.ok, S.mic && S.mic.shortcutOk, s.mic.shortcut, ui.recShortcut, ui.recPreview, ui.recError].join('|');
 }
 
 function renderSettings(force = false) {
@@ -961,7 +964,7 @@ function renderSettings(force = false) {
   const system = section('System', 'activity', [
     row('Show on the island', 'CPU use and GPU temperature (or memory) next to what the island shows', switchHtml('system.islandReadout')),
     fps.available === true
-      ? row('FPS in games', 'A small counter over fullscreen games, instead of hiding the island', segHtml('system.fpsInGames', [['off', 'Off'], ['top-left', 'Top left'], ['top', 'Top'], ['top-right', 'Top right']]))
+      ? row('FPS in games', 'Where the FPS shows while a fullscreen game is in front: a corner, or inside the island', segHtml('system.fpsInGames', [['off', 'Off'], ['island', 'In the island'], ['top-left', 'Top left'], ['top-right', 'Top right']]))
       : row('FPS counter', typeof fpsHelp === 'function' ? fpsHelp(fps) : '', fps.requested && fps.reason === 'permission' ? '' : '<button class="btn small" data-act="fps-allow">Allow</button>'),
   ].join(''));
 
@@ -972,6 +975,8 @@ function renderSettings(force = false) {
       `${rangeHtml('general.islandOffset', 0, Math.max(40, (window.screen.availHeight || 1040) - 540), 1).replace('<input', s.general.lockPosition ? '<input disabled' : '<input')}<button class="btn small" data-act="reset-position"${s.general.islandOffset && !s.general.lockPosition ? '' : ' disabled'}>Reset</button>`),
     row('Lock position', 'Keeps the island where it is, so it can\'t be dragged by accident', switchHtml('general.lockPosition')),
     row('Hide the island', 'Bring it back from the tray icon', `<button class="btn small" data-act="hide-island">${ic('eyeOff')}Hide</button>`),
+    row('Updates', updateText(), updateButton()),
+    row('Check for updates automatically', 'Once a day, Hilal asks GitHub if there is a new version (nothing else is sent)', switchHtml('general.checkUpdates')),
     row('Quit', `Hilal ${esc(S.meta.version)}`, `<button class="btn small danger" data-act="quit">${ic('power')}Quit</button>`),
   ].join(''));
 
@@ -1532,6 +1537,8 @@ document.addEventListener('click', async (e) => {
     case 'hide-island': collapse(); api.app.hide(); break;
     case 'reset-position': api.settings.update({ general: { islandOffset: 0 } }); break;
     case 'quit': api.app.quit(); break;
+    case 'update-check': checkUpdate(); break;
+    case 'update-install': installUpdate(); break;
     default: break;
   }
 });
@@ -1672,3 +1679,64 @@ function tick() {
   setInterval(tick, 1000);
   document.fonts.ready.then(() => { ui.compactHtml = ''; renderCompact(); setGeometry(); });
 })();
+
+// ================================================================ updates
+
+// ui.update: { checking, info, progress, error }
+function updateText() {
+  const u = ui.update || {};
+  const v = `Hilal ${S.meta.version}`;
+  if (u.error) return `${v} · ${esc(u.error)}`;
+  if (u.progress != null) return `Downloading ${u.info ? u.info.latest : ''}... ${Math.round(u.progress * 100)}%`;
+  if (u.checking) return `${v} · Checking...`;
+  if (u.info && u.info.available) return `${v} · Version ${esc(u.info.latest)} is available`;
+  if (u.info) return `${v} · You have the latest version`;
+  return v;
+}
+
+function updateButton() {
+  const u = ui.update || {};
+  if (u.progress != null) return '';
+  if (u.info && u.info.available) return `<button class="btn small primary" data-act="update-install">${ic('download')}Update to ${esc(u.info.latest)}</button>`;
+  return `<button class="btn small" data-act="update-check"${u.checking ? ' disabled' : ''}>${ic('refresh')}Check now</button>`;
+}
+
+function refreshUpdateRow() {
+  if (ui.mode === 'expanded' && ui.tab === 'settings') renderSettings(true);
+}
+
+async function checkUpdate() {
+  ui.update = { checking: true };
+  refreshUpdateRow();
+  const r = await api.updateCheck();
+  ui.update = r && r.error ? { error: "Couldn't reach GitHub. Check your internet and try again" } : { info: r };
+  refreshUpdateRow();
+}
+
+async function installUpdate() {
+  ui.update = { ...(ui.update || {}), progress: 0, error: '' };
+  refreshUpdateRow();
+  const r = await api.updateInstall();
+  if (r && r.error) {
+    ui.update = { info: (ui.update || {}).info, error: r.error };
+    refreshUpdateRow();
+  }
+  // otherwise the installer opens and Hilal closes
+}
+
+api.on('update:progress', (p) => {
+  ui.update = { ...(ui.update || {}), progress: p };
+  // update just the text, without redrawing all of Settings 4 times a second
+  const rows = [...document.querySelectorAll('.s-row')].filter((r) => r.querySelector('b') && r.querySelector('b').textContent === 'Updates');
+  const span = rows[0] && rows[0].querySelector('.s-label > span');
+  if (span) span.textContent = updateText();
+});
+
+// The daily look found a new version.
+api.on('update:available', (info) => {
+  ui.update = { info };
+  present('toast', {
+    icon: 'download', tone: 'blue', title: `Hilal ${info.latest} is available`, text: 'Update now, or later from Settings', duration: 15, tab: 'settings',
+    actions: [{ label: 'Update', primary: true, run: () => { expand('settings'); installUpdate(); } }],
+  });
+});

@@ -64,6 +64,7 @@ function createDefaults(app) {
       timeFormat: '12h',
       islandOffset: 0, // how far below the top of the screen the island sits (drag it to change)
       lockPosition: false, // when on, dragging doesn't move the island
+      checkUpdates: true, // look for a new version on GitHub once a day
       volumeHud: true, // the island shows volume changes instead of the Windows pop-up
       scrollVolume: true, // scroll on the island to change the volume (Shift for brightness)
     },
@@ -119,8 +120,10 @@ function sanitize(s, d) {
   if (!['12h', '24h'].includes(s.general.timeFormat)) s.general.timeFormat = '12h';
   s.general.islandOffset = Math.round(clamp(s.general.islandOffset, 0, 4000, 0));
   s.general.lockPosition = s.general.lockPosition === true;
+  s.general.checkUpdates = s.general.checkUpdates !== false;
   s.system.islandReadout = s.system.islandReadout === true;
-  if (!['off', 'top-left', 'top', 'top-right'].includes(s.system.fpsInGames)) s.system.fpsInGames = 'top-left';
+  if (s.system.fpsInGames === 'top') s.system.fpsInGames = 'island'; // 'Top' became 'In the island'
+  if (!['off', 'island', 'top-left', 'top-right'].includes(s.system.fpsInGames)) s.system.fpsInGames = 'top-left';
   s.system.fpsRequested = s.system.fpsRequested === true;
   s.devices.connectPopup = s.devices.connectPopup !== false;
   if (s.mic.shortcut !== 'off' && !isShortcut(s.mic.shortcut)) s.mic.shortcut = 'Control+Alt+K';

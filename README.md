@@ -130,7 +130,7 @@ Requires Windows 10 or 11, 64-bit. No admin rights needed.
 
 ## Privacy
 
-Hilal works offline. It has no account, no ads, no analytics, and it sends nothing anywhere. Prayer times are calculated on your PC. The internet is used only for files you choose to download, and location detection uses Windows' own location service, which stays on your device. Your settings live in `%APPDATA%\Hilal`.
+Hilal works offline. It has no account, no ads, no analytics, and it sends nothing anywhere. Prayer times are calculated on your PC. The internet is used only for files you choose to download, and once a day to ask GitHub whether there is a new version (you can turn that off in Settings, and update from there with one click), and location detection uses Windows' own location service, which stays on your device. Your settings live in `%APPDATA%\Hilal`.
 
 ## Build from source
 
