@@ -1313,7 +1313,8 @@ namespace HilalHelper
         const int LogfileSize = 448;
 
         static readonly object Gate = new object();
-        static Dictionary<uint, int> counts = new Dictionary<uint, int>();
+        // frames per (process, swap chain) since the last tick
+        static Dictionary<KeyValuePair<uint, long>, int> counts = new Dictionary<KeyValuePair<uint, long>, int>();
         static readonly Dictionary<uint, string> names = new Dictionary<uint, string>();
         static readonly Stopwatch clock = new Stopwatch();
         static IntPtr props, logfile, loggerName;
@@ -1343,7 +1344,7 @@ namespace HilalHelper
                     string why = Open();
                     if (why != null) { Report(Unavailable(why)); return; }
                     running = true;
-                    lock (counts) counts = new Dictionary<uint, int>();
+                    lock (counts) counts = new Dictionary<KeyValuePair<uint, long>, int>();
                     clock.Restart();
                     timer = new Timer(delegate { Tick(); }, null, 1000, 1000);
                 }
@@ -1445,11 +1446,30 @@ namespace HilalHelper
                         || (provider == D3d9Data1 && id == 1);                // D3D9 Present_Start
             if (!present) return;
             uint pid = (uint)Marshal.ReadInt32(record, 12);
+            // The event's data starts with the swap chain pointer, then the present flags.
+            // EVENT_RECORD: UserDataLength at 86, UserData at 96; header flag 0x20 = 32-bit process.
+            long chain = 0;
+            uint flags = 0;
+            try
+            {
+                int ptrSize = (Marshal.ReadInt16(record, 4) & 0x20) != 0 ? 4 : 8;
+                int length = Marshal.ReadInt16(record, 86) & 0xffff;
+                IntPtr data = Marshal.ReadIntPtr(record, 96);
+                if (data != IntPtr.Zero && length >= ptrSize + 4)
+                {
+                    chain = ptrSize == 8 ? Marshal.ReadInt64(data) : (uint)Marshal.ReadInt32(data);
+                    flags = (uint)Marshal.ReadInt32(data, ptrSize);
+                }
+            }
+            catch { }
+            // DXGI_PRESENT_TEST: the game only checks whether its window is visible; no frame is shown.
+            if (provider == DxgiData1 && (flags & 1) != 0) return;
+            var key = new KeyValuePair<uint, long>(pid, chain);
             lock (counts)
             {
                 int c;
-                counts.TryGetValue(pid, out c);
-                counts[pid] = c + 1;
+                counts.TryGetValue(key, out c);
+                counts[key] = c + 1;
             }
         }
 
@@ -1469,14 +1489,21 @@ namespace HilalHelper
         // Once a second: the app in front, and the three apps drawing the most frames.
         static void Tick()
         {
-            Dictionary<uint, int> snap;
+            Dictionary<KeyValuePair<uint, long>, int> raw;
             double secs;
             lock (counts)
             {
-                snap = counts;
-                counts = new Dictionary<uint, int>();
+                raw = counts;
+                counts = new Dictionary<KeyValuePair<uint, long>, int>();
                 secs = clock.Elapsed.TotalSeconds;
                 clock.Restart();
+            }
+            // each app's frames = its busiest swap chain
+            var snap = new Dictionary<uint, int>();
+            foreach (var kv in raw)
+            {
+                int c;
+                if (!snap.TryGetValue(kv.Key.Key, out c) || kv.Value > c) snap[kv.Key.Key] = kv.Value;
             }
             if (secs < 0.2) return;
             uint fg = 0;
