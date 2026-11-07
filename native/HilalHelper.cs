@@ -105,6 +105,8 @@ namespace HilalHelper
                 case "fps": Fps.Watch(arg == "1"); break;
                 case "fpsprobe": Fps.Probe(); break;
                 case "micget": Mic.Send("query"); break;
+                case "kbdwatch": KeyboardWatch.Watch(arg == "1"); break;
+                case "kbdget": KeyboardWatch.Report(); break;
                 case "micmute": Mic.Set(arg == "1", p.Length > 2 ? p[2] : "island"); break;
                 case "mictoggle": Mic.Toggle(arg.Length > 0 ? arg : "key"); break;
                 case "devices": ThreadPool.QueueUserWorkItem(delegate { BtDevices.Refresh(true); }); break;
@@ -1925,6 +1927,77 @@ namespace HilalHelper
             }
             catch { }
             return 0;
+        }
+    }
+
+    // --------------------------------------------------------------- keyboard
+
+    // The typing language of the window you're in (Alt+Shift, Win+Space) and Caps Lock. Only your own
+    // switches are reported: a different language that comes with switching windows is not.
+    static class KeyboardWatch
+    {
+        [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, IntPtr pid);
+        [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint thread);
+        [DllImport("user32.dll")] static extern short GetKeyState(int key);
+
+        static readonly object Gate = new object();
+        static Timer timer;
+        static IntPtr lastWindow;
+        static int lastLang = -1;
+        static int lastCaps = -1;
+
+        public static void Watch(bool on)
+        {
+            lock (Gate)
+            {
+                if (timer != null) { timer.Dispose(); timer = null; }
+                lastLang = -1;
+                lastCaps = -1;
+                if (on) timer = new Timer(delegate { Tick(); }, null, 300, 150);
+            }
+        }
+
+        static void Tick()
+        {
+            try
+            {
+                IntPtr fg = GetForegroundWindow();
+                uint thread = GetWindowThreadProcessId(fg, IntPtr.Zero);
+                int lang = thread == 0 ? 0 : (int)((long)GetKeyboardLayout(thread) & 0xFFFF);
+                int caps = GetKeyState(0x14 /* VK_CAPITAL */) & 1;
+                bool sameWindow = fg == lastWindow;
+                if (lastLang > 0 && lang > 0 && lang != lastLang && sameWindow) Send("lang", lang, caps);
+                if (lastCaps >= 0 && caps != lastCaps) Send("caps", lang > 0 ? lang : lastLang, caps);
+                if (lang > 0) lastLang = lang;
+                lastCaps = caps;
+                lastWindow = fg;
+            }
+            catch { }
+        }
+
+        public static void Report()
+        {
+            IntPtr fg = GetForegroundWindow();
+            uint thread = GetWindowThreadProcessId(fg, IntPtr.Zero);
+            int lang = thread == 0 ? 0 : (int)((long)GetKeyboardLayout(thread) & 0xFFFF);
+            Send("query", lang, GetKeyState(0x14) & 1);
+        }
+
+        static void Send(string what, int lang, int caps)
+        {
+            string code = "", name = "";
+            try
+            {
+                var c = CultureInfo.GetCultureInfo(lang);
+                code = c.TwoLetterISOLanguageName;
+                var neutral = c.IsNeutralCulture ? c : c.Parent;
+                name = neutral.NativeName;
+                if (name.Length > 0) name = char.ToUpper(name[0]) + name.Substring(1);
+            }
+            catch { }
+            Out.Send("{\"type\":\"kbd\",\"what\":" + Json.Str(what) + ",\"lang\":" + lang + ",\"code\":" + Json.Str(code)
+                + ",\"name\":" + Json.Str(name) + ",\"caps\":" + Json.Bool(caps == 1) + "}");
         }
     }
 

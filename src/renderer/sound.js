@@ -517,3 +517,30 @@ document.addEventListener('click', async (e) => {
 // clicked somewhere else: stop listening for keys
 api.on('window:blur', () => stopShortcutRecording());
 api.on('window:visible', (v) => { if (!v) stopShortcutRecording(); });
+
+// ------------------------------------------------------------- keyboard pop-ups
+
+// A short note on the island (like the volume pop-up), or in the status chip when it's open.
+function showNote(kind, inner, flash) {
+  if (ui.mode === 'expanded') {
+    ui.flash = { label: flash, until: Date.now() + 1600 };
+    renderBar();
+    clearTimeout(ui.flashTimer);
+    ui.flashTimer = setTimeout(renderBar, 1650);
+    return;
+  }
+  if (ui.mode !== 'compact' && ui.mode !== 'osd') return; // never over the azan or a notice
+  E.osd.innerHTML = `<div class="osd note ${kind}">${inner}</div>`;
+  if (ui.mode !== 'osd') setMode('osd');
+  clearTimeout(ui.hudTimer);
+  ui.hudTimer = setTimeout(hideHud, 1400);
+}
+
+api.on('kbd', (k) => {
+  if (k.what === 'lang') {
+    const badge = k.code === 'ar' ? 'ع' : (k.code || '?').toUpperCase();
+    showNote('lang', `<span class="lang-badge">${esc(badge)}</span><span class="osd-text"${k.code === 'ar' ? ' dir="rtl"' : ''}>${esc(k.name || k.code)}</span>`, k.name || k.code);
+  } else if (k.what === 'caps') {
+    showNote(`caps${k.caps ? ' on' : ''}`, `<span class="caps-key">${ic('arrowUp')}</span><span class="osd-text">Caps Lock ${k.caps ? 'on' : 'off'}</span>`, `Caps Lock ${k.caps ? 'on' : 'off'}`);
+  }
+});

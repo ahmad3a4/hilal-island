@@ -479,6 +479,18 @@ function toggleMic(source) {
   if (helper) helper.send('mictoggle', source);
 }
 
+// ------------------------------------------------------------------ keyboard
+
+let keyboardWatching = null;
+function syncKeyboardWatch(force = false) {
+  if (!helper) return;
+  const k = settings.get().keyboard;
+  const want = !DEMO && (k.language || k.capsLock);
+  if (want === keyboardWatching && !force) return;
+  keyboardWatching = want;
+  helper.send('kbdwatch', want ? '1' : '0');
+}
+
 // ------------------------------------------------------------------- updates
 
 // Settings > General > Updates, and a daily look (if allowed) that offers the new version.
@@ -1140,6 +1152,7 @@ async function start() {
     if (soundWatching) helper.send('mixerwatch', '1');
     if (sysTimer) helper.send('sysmon', '1');
     helper.send('micget');
+    syncKeyboardWatch(true);
     fpsOn = false;
     helper.send('fpsprobe'); // can we count frames? (answers with an 'fps' message)
   });
@@ -1157,6 +1170,10 @@ async function start() {
   });
   helper.on('peaks', (msg) => { if (!demoSound) send('sound:peaks', msg); });
   helper.on('devices', (msg) => onDevices(msg.list || []));
+  helper.on('kbd', (msg) => {
+    const k = settings.get().keyboard;
+    if ((msg.what === 'lang' && k.language) || (msg.what === 'caps' && k.capsLock)) send('kbd', msg);
+  });
   helper.on('mic', (msg) => {
     const was = state.mic ? state.mic.muted : null;
     state.mic = { ok: msg.ok, muted: msg.muted, device: msg.device };
@@ -1224,6 +1241,7 @@ async function start() {
     }
     if (patch.general && 'volumeHud' in patch.general) syncVolumeKeys();
     if (patch.general && 'scrollVolume' in patch.general) syncWheelZone();
+    if (patch.keyboard) syncKeyboardWatch();
     if (patch.mic) {
       syncMicShortcut();
       if ('overlay' in patch.mic) updateVisibility();
@@ -1346,6 +1364,7 @@ async function runDemo() {
       if (arg === 'connect') onDevices([pods(true, 80), pad(true, 55), mouse]);
       if (arg === 'low') onDevices([pods(true, 18), pad(true, 55), mouse]);
     }
+    if (kind === 'kbd') send('kbd', arg === 'caps' ? { what: 'caps', caps: true } : arg === 'ar' ? { what: 'lang', code: 'ar', name: 'العربية' } : { what: 'lang', code: 'en', name: 'English' }); // screenshots
     if (kind === 'fsflag') { state.fullscreen = arg !== 'off'; send('fullscreen', state.fullscreen); } // screenshots: pretend a fullscreen game
     if (kind === 'fpsdemo') {
       // sample FPS for screenshots: "Fortnite" at around 150 FPS

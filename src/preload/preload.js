@@ -4,7 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const CHANNELS = [
   'settings', 'prayer', 'media', 'thumb', 'downloads', 'download:done', 'download:failed', 'reminder', 'azan:start', 'azan:end',
   'prayer:pre-alert', 'clipboard:link', 'fullscreen', 'window:blur', 'ui:open', 'toast', 'pointer', 'window:visible',
-  'sound:volume', 'sound:mixer', 'sound:peaks', 'brightness', 'system', 'fps', 'game', 'devices', 'mic', 'playtime', 'pill', 'update:available', 'update:progress',
+  'sound:volume', 'sound:mixer', 'sound:peaks', 'brightness', 'system', 'fps', 'game', 'devices', 'mic', 'playtime', 'pill', 'update:available', 'update:progress', 'kbd',
 ];
 
 contextBridge.exposeInMainWorld('island', {

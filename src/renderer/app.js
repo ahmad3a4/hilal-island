@@ -209,7 +209,7 @@ function setGeometry() {
     case 'reminder': w = 780; h = E.reminder.offsetHeight; r = 38; break;
     case 'azan': w = 560; h = E.azan.offsetHeight; r = 40; break;
     case 'toast': w = 440; h = E.toast.offsetHeight; r = 28; break;
-    case 'osd': w = 340; h = 44; r = 22; break;
+    case 'osd': w = E.osd.querySelector('.note') ? 236 : 340; h = 44; r = 22; break; // short notes are narrower
     default: w = clamp(E.compact.offsetWidth, 110, 460); h = 36; r = 18;
   }
   h = Math.min(h, 524);
@@ -947,6 +947,11 @@ function renderSettings(force = false) {
   ].join(''));
 
   const fps = S.fps || {};
+  const keyboard = section('Keyboard', 'keyboard', [
+    row('Typing language', 'A short pop-up when you switch language, like Arabic and English', switchHtml('keyboard.language')),
+    row('Caps Lock', 'A short pop-up when Caps Lock turns on or off', switchHtml('keyboard.capsLock')),
+  ].join(''));
+
   const mic = S.mic || {};
   const microphone = section('Microphone', 'mic', [
     row('Mute shortcut', typeof shortcutHelp === 'function' ? shortcutHelp(mic) : '', typeof shortcutControlHtml === 'function' ? shortcutControlHtml() : ''),
@@ -980,7 +985,7 @@ function renderSettings(force = false) {
     row('Quit', `Hilal ${esc(S.meta.version)}`, `<button class="btn small danger" data-act="quit">${ic('power')}Quit</button>`),
   ].join(''));
 
-  v.innerHTML = `<div class="settings">${location}${azan}${azkar}${downloads}${sound}${microphone}${system}${bluetooth}${general}</div>${ui.sheet ? sheetHtml() : ''}`;
+  v.innerHTML = `<div class="settings">${location}${azan}${azkar}${downloads}${sound}${microphone}${keyboard}${system}${bluetooth}${general}</div>${ui.sheet ? sheetHtml() : ''}`;
   const sc = v.querySelector('.settings');
   sc.scrollTop = scroll;
   if (ui.sheet) {

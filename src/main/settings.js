@@ -44,6 +44,10 @@ function createDefaults(app) {
       watchBrowser: true,
       clipboard: true,
     },
+    keyboard: {
+      language: true, // a pop-up when you switch typing language
+      capsLock: true, // and when Caps Lock goes on or off
+    },
     mic: {
       shortcut: 'Control+Alt+K', // mutes the microphone in every app ('off' for none)
       sound: true, // a short tone when it changes
@@ -128,6 +132,8 @@ function sanitize(s, d) {
   s.devices.connectPopup = s.devices.connectPopup !== false;
   if (s.mic.shortcut !== 'off' && !isShortcut(s.mic.shortcut)) s.mic.shortcut = 'Control+Alt+K';
   s.mic.sound = s.mic.sound !== false;
+  s.keyboard.language = s.keyboard.language !== false;
+  s.keyboard.capsLock = s.keyboard.capsLock !== false;
   s.mic.overlay = s.mic.overlay !== false;
   s.devices.lowBattery = s.devices.lowBattery !== false;
   return s;

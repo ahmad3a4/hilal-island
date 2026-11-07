@@ -124,6 +124,7 @@ Requires Windows 10 or 11, 64-bit. No admin rights needed.
 | Move it up or down | Drag the island. Settings → *Position* puts it back, and *Lock position* keeps it in place |
 | Change the volume | Scroll on the island (hold Shift for brightness), or use the volume keys |
 | Mute your microphone | Ctrl+Alt+K, or the tray icon |
+| See your keyboard language | Switch with Alt+Shift: the island shows ع العربية or EN English (and Caps Lock) |
 | Pause the pop-ups for a while | Tray icon → *Pause reminders for 1 hour* |
 | Stop the azan | The **إيقاف الأذان** button, or the tray icon |
 | Hide the island | Tray icon → *Hide the island* |
