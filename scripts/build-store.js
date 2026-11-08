@@ -1,6 +1,6 @@
 // Builds the Microsoft Store package (dist/Hilal-<version>.appx). Upload it in Partner Center; the
 // Store signs it. The identity comes from Partner Center > Product identity, saved in store.json:
-//   { "identityName": "...", "publisher": "CN=...", "publisherDisplayName": "..." }
+//   { "identityName": "...", "publisher": "CN=...", "publisherDisplayName": "...", "displayName": "<the reserved app name>" }
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -24,7 +24,7 @@ builder.build({
       identityName: id.identityName,
       publisher: id.publisher,
       publisherDisplayName: id.publisherDisplayName,
-      displayName: 'Hilal',
+      displayName: id.displayName || 'Hilal', // must match the name reserved in Partner Center
       applicationId: 'Hilal',
       minVersion: '10.0.17763.0',
       maxVersionTested: '10.0.26100.0',
