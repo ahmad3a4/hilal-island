@@ -49,7 +49,7 @@ Prayer times, azan and azkar
 
 **Support contact:** https://github.com/ahmad3a4/hilal-island/issues
 
-**Screenshots:** the images in `docs/screenshots/`.
+**Screenshots:** the ten 1920x1080 images in `docs/store-screenshots/` (made by `scripts/store-screenshots.ps1`).
 
 ## Arabic (ar-sa)
 
