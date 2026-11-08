@@ -974,14 +974,18 @@ function renderSettings(force = false) {
   ].join(''));
 
   const general = section('General', 'settings', [
-    row('Start with Windows', '', switchHtml('general.launchAtStartup')),
+    S.meta.store
+      ? row('Start with Windows', 'Turn it on or off in Task Manager → Startup apps', '')
+      : row('Start with Windows', '', switchHtml('general.launchAtStartup')),
     row('Hide in fullscreen apps', 'Gets out of the way of games and videos (the azan still shows)', switchHtml('general.hideInFullscreen')),
     row('Position', s.general.lockPosition ? 'Locked. Turn off Lock position to move it' : 'Drag the island up or down, or set it here',
       `${rangeHtml('general.islandOffset', 0, Math.max(40, (window.screen.availHeight || 1040) - 540), 1).replace('<input', s.general.lockPosition ? '<input disabled' : '<input')}<button class="btn small" data-act="reset-position"${s.general.islandOffset && !s.general.lockPosition ? '' : ' disabled'}>Reset</button>`),
     row('Lock position', 'Keeps the island where it is, so it can\'t be dragged by accident', switchHtml('general.lockPosition')),
     row('Hide the island', 'Bring it back from the tray icon', `<button class="btn small" data-act="hide-island">${ic('eyeOff')}Hide</button>`),
-    row('Updates', updateText(), updateButton()),
-    row('Check for updates automatically', 'Once a day, Hilal asks GitHub if there is a new version (nothing else is sent)', switchHtml('general.checkUpdates')),
+    ...(S.meta.store ? [row('Updates', 'The Microsoft Store keeps Hilal up to date', '')] : [
+      row('Updates', updateText(), updateButton()),
+      row('Check for updates automatically', 'Once a day, Hilal asks GitHub if there is a new version (nothing else is sent)', switchHtml('general.checkUpdates')),
+    ]),
     row('Quit', `Hilal ${esc(S.meta.version)}`, `<button class="btn small danger" data-act="quit">${ic('power')}Quit</button>`),
   ].join(''));
 

@@ -2,3 +2,4 @@
 dist/
 native/bin/
 *.lnk
+store.json

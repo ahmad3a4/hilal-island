@@ -105,6 +105,10 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(start);
 }
 
+// The Microsoft Store version: the Store installs updates, and Windows runs it at sign-in
+// (Task Manager > Startup apps), so Hilal's own updater and Run-key entry are off.
+const STORE = !!process.windowsStore || process.env.DI_STORE === '1'; // DI_STORE: try it from the project
+
 function meta() {
   return {
     methods: Object.entries(METHODS).map(([id, m]) => ({ id, name: m.name, ar: m.ar })),
@@ -114,6 +118,7 @@ function meta() {
     downloadsFolder: app.getPath('downloads'),
     version: app.getVersion(),
     debug: !!process.env.DI_DEBUG,
+    store: STORE,
   };
 }
 
@@ -498,6 +503,7 @@ let updateInfo = null;
 let updating = false;
 
 async function checkForUpdate(quietly) {
+  if (STORE) return { store: true };
   try {
     updateInfo = await updater.check(app.getVersion());
     if (!quietly) activity(`update check: ${updateInfo.available ? `${updateInfo.latest} available` : 'up to date'}`);
@@ -512,6 +518,7 @@ async function checkForUpdate(quietly) {
 }
 
 async function installUpdate() {
+  if (STORE) return { error: 'The Microsoft Store updates Hilal' };
   if (updating) return { error: 'Already downloading' };
   if (!updateInfo || !updateInfo.available) await checkForUpdate(false);
   if (!updateInfo || !updateInfo.available) return { error: 'No new version' };
@@ -532,7 +539,7 @@ async function installUpdate() {
 }
 
 function scheduleUpdateChecks() {
-  if (DEMO || process.env.DI_USER_DATA) return; // test runs never look
+  if (DEMO || STORE || process.env.DI_USER_DATA) return; // test runs and the Store version never look
   const run = () => { if (settings.get().general.checkUpdates) checkForUpdate(true); };
   setTimeout(run, 60e3);
   setInterval(run, 24 * 3600e3);
@@ -825,18 +832,19 @@ function rebuildTrayMenu() {
     { label: 'Stop the azan', enabled: !!state.azan, click: () => endAzan('stopped') },
     { type: 'separator' },
     { label: 'Settings', click: () => { showIsland(); send('ui:open', 'settings'); } },
-    {
+    ...(STORE ? [] : [{
       label: 'Start with Windows',
       type: 'checkbox',
       checked: s.general.launchAtStartup,
       click: (item) => settings.update({ general: { launchAtStartup: item.checked } }),
-    },
+    }]),
     { type: 'separator' },
     { label: 'Quit Hilal', click: () => app.quit() },
   ]));
 }
 
 function applyLoginItem(enabled) {
+  if (STORE) return;
   const opts = { openAtLogin: enabled, path: process.execPath };
   if (!app.isPackaged) opts.args = [ROOT];
   try { app.setLoginItemSettings(opts); } catch (err) { console.warn('Login item:', err.message); }

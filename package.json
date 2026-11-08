@@ -31,7 +31,8 @@
     "build:helper": "node scripts/build-helper.js",
     "fetch:ayat": "node scripts/fetch-ayat.js",
     "test:prayer": "node scripts/test-prayer.js",
-    "test:downloads": "node scripts/test-downloads.js"
+    "test:downloads": "node scripts/test-downloads.js",
+    "dist:store": "node scripts/build-store.js"
   },
   "devDependencies": {
     "electron": "44.10.1",

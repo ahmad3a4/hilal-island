@@ -143,6 +143,7 @@ cd hilal-island
 npm install      # also downloads Electron and builds the native helper
 npm start        # run Hilal
 npm run dist     # build the installer into dist/
+npm run dist:store  # build the Microsoft Store package (needs store.json, see scripts/build-store.js)
 ```
 
 Other scripts: `npm run test:prayer` compares the prayer times with the Aladhan API, `npm run test:downloads` checks the downloader against a local server that imitates difficult hosts, `npm run fetch:ayat` re-downloads the verses from Tanzil, and `scripts/screenshots.ps1` retakes the screenshots in this README.
